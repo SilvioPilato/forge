@@ -13,8 +13,8 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct Dedup {
-    pub reuse: f64,
-    pub warn: f64,
+    pub reuse: f32,
+    pub warn: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -47,9 +47,9 @@ struct ConfigToml {
 #[serde(default)]
 struct DedupToml {
     #[serde(default = "default_reuse")]
-    reuse: f64,
+    reuse: f32,
     #[serde(default = "default_warn")]
-    warn: f64,
+    warn: f32,
 }
 
 impl Default for DedupToml {
@@ -76,11 +76,11 @@ impl Default for EmbeddingToml {
     }
 }
 
-fn default_reuse() -> f64 {
+fn default_reuse() -> f32 {
     0.90
 }
 
-fn default_warn() -> f64 {
+fn default_warn() -> f32 {
     0.75
 }
 
@@ -106,6 +106,8 @@ impl Config {
         }
 
         let roots: Vec<PathBuf> = roots.iter().map(|r| file_dir.join(r)).collect();
+        let roots: Result<Vec<PathBuf>, _> = roots.into_iter().map(|r| r.canonicalize()).collect();
+        let roots = roots.map_err(ConfigError::Io)?;
 
         let write_dir = roots.first().cloned().unwrap();
 
@@ -144,11 +146,15 @@ mod tests {
             "/../../fixtures/corpus"
         ));
         let cfg = Config::load(&dir.join("forge.toml")).unwrap();
-        assert_eq!(cfg.roots, vec![dir.join("decisions"), dir.join("forces")]);
-        assert!((cfg.dedup.reuse - 0.90).abs() < 1e-9);
-        assert!((cfg.dedup.warn - 0.75).abs() < 1e-9);
+        let expected_roots = vec![
+            dir.join("decisions").canonicalize().unwrap(),
+            dir.join("forces").canonicalize().unwrap(),
+        ];
+        assert_eq!(cfg.roots, expected_roots);
+        assert!((cfg.dedup.reuse - 0.90).abs() < 1e-4);
+        assert!((cfg.dedup.warn - 0.75).abs() < 1e-4);
         assert_eq!(cfg.embedding.model, "fake-bucket");
-        assert_eq!(cfg.write_dir, dir.join("decisions"));
+        assert_eq!(cfg.write_dir, dir.join("decisions").canonicalize().unwrap());
     }
 
     #[test]
