@@ -46,8 +46,8 @@ binary, so each MCP client entry points at one workspace. Keys:
 - `dedup.reuse = 0.90`, `dedup.warn = 0.75`
 - `embedding.model = "intfloat/multilingual-e5-small"`
 - `cache_dir` — override for the model/vector cache location
-- `write_dir` — where the guardian places new records (default: `decisions/` and `forces/`
-  under the first root), named `<id>.md`
+- `write_dir` — a single base directory under which the guardian places new records in the
+  fixed subdirectories `decisions/` and `forces/`, named `<id>.md` (default: the first root)
 
 Everything except `roots` has a default.
 
@@ -87,11 +87,37 @@ Everything except `roots` has a default.
 - **H. Guardian** — the only file writer. `propose_decision` is pure: composes records,
   validates, attaches near-matches; safe to call repeatedly. `commit`: re-validate against the
   current snapshot → de-dup gate (per §1.6) → write new files append-only → synchronous
-  rebuild → return the new snapshot's view of what was written. `set_status` appends one
-  transition to `status_log` (the only in-place file change). `supersede` writes a new
-  Decision carrying `supersedes`. No raw write / edit / delete exists.
-- **I. MCP server** — the six spec-§5 tools mapped 1:1 onto F, G, H. Holds `Arc<Snapshot>`
-  swapped atomically on rebuild; synchronous commit = respond only after the swap.
+  rebuild → return the new snapshot's view of what was written. Decisions are committed with
+  `status: accepted` (the propose→assent conversation *is* the proposal phase; `proposed` and
+  `rejected` exist in the schema but have no v0 workflow). `set_status` is the only in-place
+  file change and covers both record types, each per its own schema: for a **Force**, append
+  one entry to `status_log` (`holds→changed→retired`, no resurrection); for a **Decision**,
+  rewrite the scalar `status` and `date` frontmatter fields (`accepted→deprecated` only) —
+  this *is* the "appending a status transition" the parent invariant §2.4 permits, since the
+  Decision schema records only the latest status + its date; title, body, and all reference
+  fields remain immutable. `supersede` writes a new Decision carrying `supersedes`.
+  No raw write / edit / delete exists.
+
+  **De-dup candidate scope:** the gate matches the proposed force against **all** known
+  forces regardless of status — a near-match that is retired or superseded is still reported
+  (with its status and `supersededBy` successor), so a duplicate of a retired force cannot
+  slip past the gate. `search`, by contrast, ranks over the frontier per spec §5.
+- **I. MCP server** — the spec-§5 tools mapped onto F, G, H. Note: the parent spec's §5
+  heading says "six tools" but lists **seven**; the heading is a miscount and the list is
+  authoritative. The MCP surface is exactly:
+  1. `search(query, scope?)` → G
+  2. `get(id)` → F (snapshot)
+  3. `why(id)` → F (snapshot)
+  4. `stale_report(filter?)` → F (snapshot, ordered per §1.5)
+  5. `propose_decision(...)` → H (pure)
+  6. `commit(proposed)` → H
+  7. `set_status(id, status)` → H
+
+  `supersede` is **not** a separate MCP tool: superseding is expressed as a normal
+  `propose_decision` carrying a `supersedes` field, followed by `commit`. The guardian's
+  supersede operation (§4.H) is the internal path those calls take.
+  The server holds `Arc<Snapshot>` swapped atomically on rebuild; synchronous commit =
+  respond only after the swap.
 
 ## 5. Concurrency and state
 
