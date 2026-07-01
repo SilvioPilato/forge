@@ -1,0 +1,6 @@
+roots = ["decisions", "forces"]   # relative to this file's directory
+[dedup]
+reuse = 0.90
+warn = 0.75
+[embedding]
+model = "fake-bucket"             # tests never hit the network
