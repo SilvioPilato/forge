@@ -27,7 +27,7 @@ A single Cargo workspace, two crates:
   I/O is file read/write (discovery, guardian) and the embedding provider's model loading.
   No MCP awareness.
 - **`forge-mcp`** (binary) — component I. Thin: parses config, builds the snapshot, loads the
-  embedding provider, serves the six tools over stdio via `rmcp`.
+  embedding provider, serves the seven tools (enumerated in §4.I) over stdio via `rmcp`.
 
 A third dev-only binary, **`forge-inspect`**, exists for build feedback (§7); it is scaffolding,
 not product surface (the spec's deferred CLI is a *user* surface; this is not that).
@@ -83,7 +83,10 @@ Everything except `roots` has a default.
   vector cache (keyed by model id) and triggers full re-embedding on next build.
 - **G. Recall** — brute-force cosine over the snapshot's vectors (no vector DB).
   `search(query, scope) -> ranked hits over the frontier`; `near_matches(text) -> hits above
-  the warn threshold`. One engine, two entry points.
+  the warn threshold`. One engine, two entry points. **Embedded text per record type:** a
+  Force embeds its `title` alone (the title *is* the claim, and de-dup compares
+  propositions); a Decision embeds `title` + body (search wants the full context). Queries
+  and passages get the E5 prefixes inside the provider.
 - **H. Guardian** — the only file writer. `propose_decision` is pure: composes records,
   validates, attaches near-matches; safe to call repeatedly. `commit`: re-validate against the
   current snapshot → de-dup gate (per §1.6) → write new files append-only → synchronous
@@ -102,6 +105,11 @@ Everything except `roots` has a default.
   forces regardless of status — a near-match that is retired or superseded is still reported
   (with its status and `supersededBy` successor), so a duplicate of a retired force cannot
   slip past the gate. `search`, by contrast, ranks over the frontier per spec §5.
+
+  **`Force.supersededBy` has no write path in v0.** No tool sets it (`set_status` carries no
+  successor argument; guardian supersede covers Decisions only). The field is read by the
+  linker and de-dup gate when present, and is hand-authored or reserved for a future tool —
+  the plan must not invent a write mechanism for it.
 - **I. MCP server** — the spec-§5 tools mapped onto F, G, H. Note: the parent spec's §5
   heading says "six tools" but lists **seven**; the heading is a miscount and the list is
   authoritative. The MCP surface is exactly:
@@ -177,8 +185,8 @@ test is spec §10 verbatim, over MCP.
 - **Phase 3 — guardian:** propose (pure) → commit with de-dup gate and synchronous rebuild →
   `set_status` transitions → supersede. Checkpoint: scripted propose→commit→set_status run
   shows staleness propagating in inspector output.
-- **Phase 4 — MCP integration:** `rmcp` server, six tools, config wiring, spec-§10 acceptance
-  test, README.
+- **Phase 4 — MCP integration:** `rmcp` server, the seven §4.I tools, config wiring,
+  spec-§10 acceptance test, README.
 
 ## 9. What "done" means
 
