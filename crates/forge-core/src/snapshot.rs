@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::discovery;
+use crate::embed::cache::VectorCache;
 use crate::embed::{Embedder, Vector};
 use crate::graph::Graph;
 use crate::judge::{judge, Verdicts};
@@ -60,14 +61,33 @@ impl Snapshot {
             text_ids.push(f.id.clone());
         }
 
-        let vectors_result = embedder
-            .embed_passages(&texts)
-            .map_err(|e| BuildError(format!("embedding failed: {}", e.0)))?;
+        let mut cache = VectorCache::new(cfg.cache_dir.clone(), embedder.model_id());
 
         let mut vectors = HashMap::new();
-        for (id, vec) in text_ids.into_iter().zip(vectors_result.into_iter()) {
-            vectors.insert(id, vec);
+        let mut missed: Vec<(String, String)> = Vec::new();
+
+        for (id, text) in text_ids.iter().zip(texts.iter()) {
+            let hash = cache.content_hash(text);
+            if let Some(vec) = cache.get(&hash) {
+                vectors.insert(id.clone(), vec.clone());
+            } else {
+                missed.push((id.clone(), text.clone()));
+            }
         }
+
+        if !missed.is_empty() {
+            let missed_texts: Vec<String> = missed.iter().map(|(_, t)| t.clone()).collect();
+            let fresh = embedder
+                .embed_passages(&missed_texts)
+                .map_err(|e| BuildError(format!("embedding failed: {}", e.0)))?;
+            for ((id, text), vec) in missed.into_iter().zip(fresh.into_iter()) {
+                let hash = cache.content_hash(&text);
+                cache.put(&hash, &vec);
+                vectors.insert(id, vec);
+            }
+        }
+
+        let _ = cache.save();
 
         Ok(Snapshot {
             graph,
