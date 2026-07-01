@@ -30,6 +30,8 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("missing required field: roots")]
     MissingRoots,
+    #[error("roots list is empty")]
+    EmptyRoots,
     #[error("{0}")]
     Other(String),
 }
@@ -102,7 +104,7 @@ impl Config {
 
         let roots: Vec<String> = parsed.roots.ok_or(ConfigError::MissingRoots)?;
         if roots.is_empty() {
-            return Err(ConfigError::MissingRoots);
+            return Err(ConfigError::EmptyRoots);
         }
 
         let roots: Vec<PathBuf> = roots.iter().map(|r| file_dir.join(r)).collect();
@@ -160,6 +162,7 @@ mod tests {
     #[test]
     fn missing_roots_is_an_error() {
         let result = Config::from_str("[dedup]\nreuse=0.9", std::path::Path::new("."));
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::MissingRoots));
     }
 }
