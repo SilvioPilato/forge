@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use chrono::NaiveDate;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,15 +114,21 @@ fn extract_frontmatter(text: &str) -> Option<(&str, &str)> {
     let text = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))?;
-    let close_pos = text.find("\n---")?;
+    let (close_pos, delim_len) = text
+        .find("\r\n---")
+        .map(|p| (p, 5))
+        .or_else(|| text.find("\n---").map(|p| (p, 4)))?;
     let yaml = &text[..close_pos];
-    let body_start = close_pos + 4; // "\n---" is 4 bytes
+    let body_start = close_pos + delim_len;
     let body = if body_start < text.len() {
         &text[body_start..]
     } else {
         ""
     };
-    let body = body.strip_prefix('\n').unwrap_or(body);
+    let body = body
+        .strip_prefix('\n')
+        .or_else(|| body.strip_prefix("\r\n"))
+        .unwrap_or(body);
     Some((yaml, body))
 }
 
@@ -161,6 +168,10 @@ fn parse_decision(path: PathBuf, raw: RawRecord, body: String) -> Parsed {
         None => return err(path, "decision requires a date field".to_string()),
     };
 
+    if NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() {
+        return err(path, format!("invalid date format: {date}"));
+    }
+
     Parsed::Decision(Decision {
         id: raw.id,
         title: raw.title,
@@ -181,11 +192,20 @@ fn parse_force(path: PathBuf, raw: RawRecord, body: String) -> Parsed {
         return err(path, "status_log must not be empty".to_string());
     }
 
+    for entry in &raw.status_log {
+        if NaiveDate::parse_from_str(&entry.since, "%Y-%m-%d").is_err() {
+            return err(path, format!("invalid date in status_log: {}", entry.since));
+        }
+    }
+
     for i in 1..raw.status_log.len() {
         let prev = &raw.status_log[i - 1];
         let curr = &raw.status_log[i];
 
-        if curr.since < prev.since {
+        let prev_date = NaiveDate::parse_from_str(&prev.since, "%Y-%m-%d").unwrap();
+        let curr_date = NaiveDate::parse_from_str(&curr.since, "%Y-%m-%d").unwrap();
+
+        if curr_date < prev_date {
             return err(
                 path,
                 format!(
