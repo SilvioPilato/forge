@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
@@ -43,7 +43,7 @@ impl Force {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ForceStatus {
     Holds,
@@ -51,7 +51,7 @@ pub enum ForceStatus {
     Retired,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DecisionStatus {
     Proposed,
@@ -263,6 +263,90 @@ fn parse_force(path: PathBuf, raw: RawRecord, body: String) -> Parsed {
     })
 }
 
+fn slice_is_empty<T>(s: &[T]) -> bool {
+    s.is_empty()
+}
+
+#[derive(Serialize)]
+struct SerDecision<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    rec_type: &'static str,
+    title: &'a str,
+    status: DecisionStatus,
+    date: &'a str,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    cites: &'a [String],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    supersedes: &'a [String],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    relates: &'a [String],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    anchors: &'a [serde_yaml::Value],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    tags: &'a [String],
+}
+
+#[derive(Serialize)]
+struct SerStatusEntry {
+    status: ForceStatus,
+    since: String,
+}
+
+#[derive(Serialize)]
+struct SerForce<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    rec_type: &'static str,
+    title: &'a str,
+    status_log: Vec<SerStatusEntry>,
+    #[serde(rename = "dependsOn", skip_serializing_if = "slice_is_empty")]
+    depends_on: &'a [String],
+    #[serde(rename = "supersededBy", skip_serializing_if = "Option::is_none")]
+    superseded_by: &'a Option<String>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    tags: &'a [String],
+}
+
+pub fn serialize_decision(d: &Decision) -> String {
+    let yaml = serde_yaml::to_string(&SerDecision {
+        id: &d.id,
+        rec_type: "decision",
+        title: &d.title,
+        status: d.status,
+        date: &d.date,
+        cites: &d.cites,
+        supersedes: &d.supersedes,
+        relates: &d.relates,
+        anchors: &d.anchors,
+        tags: &d.tags,
+    })
+    .unwrap();
+    format!("---\n{}---\n{}", yaml, d.body)
+}
+
+pub fn serialize_force(f: &Force) -> String {
+    let status_log: Vec<SerStatusEntry> = f
+        .status_log
+        .iter()
+        .map(|e| SerStatusEntry {
+            status: e.status,
+            since: e.since.clone(),
+        })
+        .collect();
+    let yaml = serde_yaml::to_string(&SerForce {
+        id: &f.id,
+        rec_type: "force",
+        title: &f.title,
+        status_log,
+        depends_on: &f.depends_on,
+        superseded_by: &f.superseded_by,
+        tags: &f.tags,
+    })
+    .unwrap();
+    format!("---\n{}---\n{}", yaml, f.body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +472,99 @@ mod tests {
                 e.message
             ),
             other => panic!("expected error, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn decision_round_trips_semantically() {
+        let dir = fixture("decisions");
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().is_some_and(|e| e == "md") {
+                let text = std::fs::read_to_string(entry.path()).unwrap();
+                let parsed1 = parse(&entry.path(), &text);
+                if let Parsed::Decision(d1) = parsed1 {
+                    let serialized = serialize_decision(&d1);
+                    let parsed2 = parse(&entry.path(), &serialized);
+                    match parsed2 {
+                        Parsed::Decision(d2) => {
+                            assert_eq!(d1.id, d2.id);
+                            assert_eq!(d1.title, d2.title);
+                            assert_eq!(d1.status, d2.status);
+                            assert_eq!(d1.date, d2.date);
+                            assert_eq!(d1.cites, d2.cites);
+                            assert_eq!(d1.supersedes, d2.supersedes);
+                            assert_eq!(d1.relates, d2.relates);
+                            assert_eq!(d1.tags, d2.tags);
+                            assert_eq!(d1.body, d2.body);
+                            assert_eq!(d1.anchors.len(), d2.anchors.len());
+                        }
+                        other => panic!("round-trip parse failed: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn force_round_trips_semantically() {
+        let dir = fixture("forces");
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if entry.path().extension().is_some_and(|e| e == "md") && fname != "malformed.md" {
+                let text = std::fs::read_to_string(entry.path()).unwrap();
+                let parsed1 = parse(&entry.path(), &text);
+                if let Parsed::Force(f1) = parsed1 {
+                    let serialized = serialize_force(&f1);
+                    let parsed2 = parse(&entry.path(), &serialized);
+                    match parsed2 {
+                        Parsed::Force(f2) => {
+                            assert_eq!(f1.id, f2.id);
+                            assert_eq!(f1.title, f2.title);
+                            assert_eq!(f1.status_log.len(), f2.status_log.len());
+                            for (a, b) in f1.status_log.iter().zip(f2.status_log.iter()) {
+                                assert_eq!(a.status, b.status);
+                                assert_eq!(a.since, b.since);
+                            }
+                            assert_eq!(f1.depends_on, f2.depends_on);
+                            assert_eq!(f1.superseded_by, f2.superseded_by);
+                            assert_eq!(f1.tags, f2.tags);
+                            assert_eq!(f1.body, f2.body);
+                        }
+                        other => panic!("round-trip parse failed: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn body_is_preserved_byte_exact() {
+        let raw = "---\nid: f-test\ntype: force\ntitle: Test\nstatus_log:\n  - { status: holds, since: 2026-01-01 }\n---\nLine one.\n\nLine two.\n\nLine three.\n";
+        match parse(Path::new("test.md"), raw) {
+            Parsed::Force(f) => {
+                let serialized = serialize_force(&f);
+                match parse(Path::new("test.md"), &serialized) {
+                    Parsed::Force(f2) => assert_eq!(f2.body, f.body),
+                    other => panic!("expected force: {other:?}"),
+                }
+            }
+            other => panic!("expected force: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serialized_frontmatter_omits_empty_optionals() {
+        let raw = "---\nid: f-test\ntype: force\ntitle: Test\nstatus_log:\n  - { status: holds, since: 2026-01-01 }\n---\nBody\n";
+        match parse(Path::new("test.md"), raw) {
+            Parsed::Force(f) => {
+                let s = serialize_force(&f);
+                assert!(!s.contains("dependsOn"));
+                assert!(!s.contains("supersededBy"));
+                assert!(!s.contains("tags:"));
+            }
+            other => panic!("expected force: {other:?}"),
         }
     }
 }
