@@ -1,10 +1,6 @@
 use std::path::PathBuf;
 
-/// A diagnostic produced during discovery
-#[derive(Debug, Clone)]
-pub enum Diagnostic {
-    MissingRoot { path: PathBuf },
-}
+use crate::linker::Diagnostic;
 
 /// Walk roots, find candidate .md files by checking for frontmatter with `type:` field.
 /// Returns (paths, diagnostics). Paths are sorted deterministically.
