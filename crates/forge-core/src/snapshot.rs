@@ -104,6 +104,7 @@ impl Snapshot {
             severity_a
                 .cmp(&severity_b)
                 .then(a.distance.cmp(&b.distance))
+                .then(b.since.cmp(&a.since))
                 .then(a.decision_id.cmp(&b.decision_id))
         });
         entries
