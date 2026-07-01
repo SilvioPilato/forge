@@ -1,3 +1,5 @@
+pub mod fake;
+
 pub type Vector = Vec<f32>;
 
 pub trait Embedder: Send + Sync {
