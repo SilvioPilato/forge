@@ -51,6 +51,18 @@ pub fn init(dir: &Path) -> Result<PathBuf, String> {
     Ok(config_path)
 }
 
+/// Ensure a corpus exists in `dir`. If `dir/forge.toml` is already present,
+/// return its path untouched. Otherwise scaffold a new corpus there via
+/// [`init`] and return the created path. Never overwrites an existing
+/// forge.toml (delegates to `init`'s race-safe `create_new`).
+pub fn ensure_corpus(dir: &Path) -> Result<PathBuf, String> {
+    let config_path = dir.join("forge.toml");
+    if config_path.is_file() {
+        return Ok(config_path);
+    }
+    init(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +101,32 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("forge.toml")).unwrap();
         assert_eq!(content, "# existing");
         // A refusal must leave the target untouched beyond the dir itself.
+        assert!(!tmp.path().join("decisions").exists());
+        assert!(!tmp.path().join("forces").exists());
+    }
+
+    #[test]
+    fn ensure_corpus_creates_if_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = ensure_corpus(tmp.path()).unwrap();
+        assert_eq!(config_path, tmp.path().join("forge.toml"));
+        assert!(tmp.path().join("decisions").is_dir());
+        assert!(tmp.path().join("forces").is_dir());
+        // Load-bearing: the scaffolded config must be loadable.
+        let cfg = forge_core::config::Config::load(&config_path).unwrap();
+        assert_eq!(cfg.roots.len(), 2);
+    }
+
+    #[test]
+    fn ensure_corpus_returns_existing_without_clobbering() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("forge.toml"), "# existing").unwrap();
+        let config_path = ensure_corpus(tmp.path()).unwrap();
+        assert_eq!(config_path, tmp.path().join("forge.toml"));
+        // Content untouched: not overwritten with the template.
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(content, "# existing");
+        // Did not create corpus subdirs (those are only for a fresh scaffold).
         assert!(!tmp.path().join("decisions").exists());
         assert!(!tmp.path().join("forces").exists());
     }
