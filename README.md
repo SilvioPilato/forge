@@ -43,18 +43,57 @@ Seven tools exposed over stdio:
 - `commit` — Write a proposed decision to disk (call only after user assent)
 - `set_status` — Change force or decision status, returns propagation impact
 
-### MCP Client Config
+### Setup for agents
+
+Install the server once, globally:
+
+```bash
+cargo install --path crates/forge-mcp
+```
+
+Bootstrap a corpus in any project:
+
+```bash
+forge-mcp init          # creates forge.toml, decisions/, forces/
+```
+
+**Claude Code** — one command, or a project-scoped `.mcp.json`:
+
+```bash
+claude mcp add forge -- forge-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "forge": { "command": "forge-mcp" }
+  }
+}
+```
+
+**Other MCP clients** (Cursor, VS Code, Claude Desktop, …) use the same
+`mcpServers` shape. If the client launches servers with an unpredictable
+working directory, pin the config explicitly:
 
 ```json
 {
   "mcpServers": {
     "forge": {
       "command": "forge-mcp",
-      "args": ["path/to/forge.toml"]
+      "env": { "FORGE_CONFIG": "C:/path/to/project/forge.toml" }
     }
   }
 }
 ```
+
+**Config resolution order:** `--config <path>` (or positional path) →
+`FORGE_CONFIG` env var → walk up from the working directory until a
+`forge.toml` is found, stopping at the repository boundary (`.git`).
+
+> **Why not MCP roots?** The protocol's `roots` capability was deprecated by
+> [SEP-2577](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2577)
+> with no replacement; args, env vars, and cwd inference are the recommended
+> configuration channels.
 
 ## First-Run Model Download
 
