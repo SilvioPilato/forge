@@ -30,7 +30,7 @@ model = "fake-bucket"              # "fake-bucket" for tests, or "intfloat/multi
 
 ## MCP Tools
 
-Eight tools exposed over stdio:
+Nine tools exposed over stdio:
 
 **Read tools** (always available):
 - `search` — Semantic search over frontier decisions and forces
@@ -40,8 +40,9 @@ Eight tools exposed over stdio:
 
 **Write tools** (require user assent):
 - `propose_decision` — Preview a new decision (pure, no writes)
-- `commit` — Write a proposed decision to disk (call only after user assent)
+- `commit` — Write a proposed decision to disk with date frontmatter auto-populated (call only after user assent)
 - `set_status` — Change force or decision status, returns propagation impact
+- `reindex` — Re-scan the corpus from disk and rebuild the index (use after manual file edits)
 
 **Setup tool:**
 - `init` — Scaffold a forge corpus (forge.toml + decisions/ + forces/) in the project root and load it into the running server. Call only after the user has assented. Refuses to overwrite an existing forge.toml.
@@ -57,7 +58,7 @@ cargo install --path crates/forge-mcp
 Bootstrap a corpus in any project:
 
 ```bash
-forge-mcp init          # creates forge.toml, decisions/, forces/
+forge-mcp init          # creates forge.toml, decisions/, forces/ and pre-downloads the embedding model into the cache (skipped when cached)
 ```
 
 **Claude Code** — one command, or a project-scoped `.mcp.json`:
@@ -107,9 +108,7 @@ working directory, pin the config explicitly:
 
 ### Empty mode
 
-With no `forge.toml` in the project (and none pinned via `--config` or `FORGE_CONFIG`), the server starts in **empty mode**: it connects immediately — no embedder is constructed, so there is no model download and no cold-cache timeout. The read tools return empty results with a hint pointing to `init`; the write tools refuse until a corpus is loaded. Call the `init` tool (after user assent) to scaffold a corpus in the project root and hot-load it without restarting the server.
-
-In empty mode the server connects instantly (no embedder). When a corpus is loaded — at startup or via the `init` tool — a cold model cache can exceed opencode's 5s tool-fetch timeout; warm the cache by running `forge-mcp` once in the project, or add `"timeout": 120000` to the entry. (The `init` tool itself is a tool *call*, not a tool *fetch*, so it is not subject to the 5s limit — the first-run download happens there.)
+With no `forge.toml` in the project (and none pinned via `--config` or `FORGE_CONFIG`), the server starts in **empty mode**: it answers the MCP handshake immediately and loads the corpus in the background. Tools return `{"status": "loading"}` until the corpus is ready, and a `notifications/message` logging notification announces readiness. The read tools return empty results with a hint pointing to `init`; the write tools refuse until a corpus is loaded. Call the `init` tool (after user assent) to scaffold a corpus in the project root and hot-load it without restarting the server.
 
 **Config resolution order:** `--config <path>` (or positional path) →
 `FORGE_CONFIG` env var → walk up from the working directory until a
