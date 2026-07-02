@@ -33,7 +33,7 @@ pub enum ForceInput {
 }
 
 pub struct Engine {
-    cfg: Config,
+    pub cfg: Config,
     embedder: Box<dyn Embedder>,
     snapshot: Arc<Snapshot>,
     used_ids: std::collections::HashSet<String>,
@@ -149,6 +149,125 @@ impl Engine {
         })
     }
 
+    pub fn commit(&mut self, proposed: Proposed) -> Result<Receipt, String> {
+        let re_proposed = self
+            .propose_decision(proposed.input.clone())
+            .map_err(|e| format!("commit validation failed: {}", e.0))?;
+        if !re_proposed.problems.is_empty() {
+            return Err(format!("invalid: {}", re_proposed.problems.join("; ")));
+        }
+
+        let mut created_force_ids = Vec::new();
+        let mut reused = Vec::new();
+        let mut warnings = Vec::new();
+
+        // reuse_map[i] = Some(existing_id) if the i-th new force was reused
+        let mut reuse_map: Vec<Option<String>> = vec![None; re_proposed.new_forces.len()];
+        let mut new_force_idx: usize = 0;
+
+        for force_input in &proposed.input.forces {
+            if let ForceInput::New {
+                title,
+                body: _,
+                force_new,
+            } = force_input
+            {
+                let near = crate::recall::near_matches(
+                    &self.snapshot,
+                    self.embedder.as_ref(),
+                    title,
+                    self.cfg.dedup.warn,
+                )
+                .unwrap_or_default();
+
+                let living_matches: Vec<_> = near
+                    .iter()
+                    .filter(|h| h.status != "retired" && h.superseded_by.is_none())
+                    .collect();
+
+                let best_living = living_matches.first();
+
+                if let Some(best) = best_living {
+                    if best.score >= self.cfg.dedup.reuse && !*force_new {
+                        reuse_map[new_force_idx] = Some(best.id.clone());
+                        reused.push(ReusedEntry {
+                            proposed_id: title.clone(),
+                            existing_id: best.id.clone(),
+                            score: best.score,
+                        });
+                        new_force_idx += 1;
+                        continue;
+                    } else if best.score >= self.cfg.dedup.warn {
+                        warnings.push(format!(
+                            "near-duplicate force '{}' (cosine {:.3} vs '{}')",
+                            title, best.score, best.id
+                        ));
+                    }
+                }
+
+                for h in &near {
+                    if h.status == "retired" || h.superseded_by.is_some() {
+                        warnings.push(format!(
+                            "near-match to retired/superseded force '{}' ({})",
+                            h.id, h.status
+                        ));
+                    }
+                }
+                new_force_idx += 1;
+            }
+        }
+
+        let write_decisions_dir = self.cfg.write_dir.join("decisions");
+        let write_forces_dir = self.cfg.write_dir.join("forces");
+        std::fs::create_dir_all(&write_decisions_dir)
+            .map_err(|e| format!("create decisions dir: {}", e))?;
+        std::fs::create_dir_all(&write_forces_dir)
+            .map_err(|e| format!("create forces dir: {}", e))?;
+
+        for (i, force) in re_proposed.new_forces.iter().enumerate() {
+            if reuse_map[i].is_none() {
+                let content = crate::record::serialize_force(force);
+                let path = write_forces_dir.join(format!("{}.md", force.id));
+                std::fs::write(&path, &content).map_err(|e| format!("write force: {}", e))?;
+                created_force_ids.push(force.id.clone());
+            }
+        }
+
+        let mut decision_cites: Vec<String> = Vec::new();
+        let mut new_force_idx = 0;
+        for force_input in &proposed.input.forces {
+            match force_input {
+                ForceInput::Existing { id } => {
+                    decision_cites.push(id.clone());
+                }
+                ForceInput::New { .. } => {
+                    if let Some(existing_id) = &reuse_map[new_force_idx] {
+                        decision_cites.push(existing_id.clone());
+                    } else {
+                        decision_cites.push(re_proposed.new_forces[new_force_idx].id.clone());
+                    }
+                    new_force_idx += 1;
+                }
+            }
+        }
+
+        let mut decision = re_proposed.decision.clone();
+        decision.cites = decision_cites;
+        let content = crate::record::serialize_decision(&decision);
+        let path = write_decisions_dir.join(format!("{}.md", decision.id));
+        std::fs::write(&path, &content).map_err(|e| format!("write decision: {}", e))?;
+
+        self.rebuild()
+            .map_err(|e| format!("rebuild after commit: {}", e))?;
+
+        Ok(Receipt {
+            decision_id: decision.id,
+            created_force_ids,
+            reused,
+            warnings,
+        })
+    }
+
     pub fn generate_id(&self, prefix: &str, title: &str) -> String {
         let slug = title
             .to_lowercase()
@@ -179,6 +298,19 @@ pub struct Proposed {
     pub problems: Vec<String>,
     pub near_matches: Vec<(String, Vec<Hit>)>,
     pub input: ProposeInput,
+}
+
+pub struct Receipt {
+    pub decision_id: String,
+    pub created_force_ids: Vec<String>,
+    pub reused: Vec<ReusedEntry>,
+    pub warnings: Vec<String>,
+}
+
+pub struct ReusedEntry {
+    pub proposed_id: String,
+    pub existing_id: String,
+    pub score: f32,
 }
 
 #[cfg(test)]
@@ -358,5 +490,139 @@ mod tests {
 
         assert_eq!(p1.decision.id, p2.decision.id);
         assert_eq!(p1.decision.title, p2.decision.title);
+    }
+
+    fn hash_all_files(dir: &PathBuf) -> std::collections::HashMap<String, String> {
+        use sha2::{Digest, Sha256};
+        use std::fs;
+        let mut hashes = std::collections::HashMap::new();
+        for entry in walkdir::WalkDir::new(dir) {
+            let entry = entry.unwrap();
+            if entry.file_type().is_file() {
+                let content = fs::read(entry.path()).unwrap();
+                let mut hasher = Sha256::new();
+                hasher.update(&content);
+                let hash = format!("{:x}", hasher.finalize());
+                hashes.insert(entry.path().to_string_lossy().to_string(), hash);
+            }
+        }
+        hashes
+    }
+
+    #[test]
+    fn commit_writes_files_and_agent_reads_its_own_write() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let p = engine
+            .propose_decision(ProposeInput {
+                title: "Commit write test".into(),
+                body: "Testing commit writes.".into(),
+                forces: vec![ForceInput::New {
+                    title: "A test force".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+
+        let receipt = engine.commit(p).unwrap();
+        assert!(!receipt.decision_id.is_empty());
+        let decision_path = engine
+            .cfg
+            .write_dir
+            .join("decisions")
+            .join(format!("{}.md", receipt.decision_id));
+        assert!(decision_path.exists());
+        let snap = engine.snapshot();
+        assert!(snap.graph.get(&receipt.decision_id).is_some());
+    }
+
+    #[test]
+    fn dedup_high_band_reuses_existing_id() {
+        let mut embedder = crate::embed::fake::PinnedEmbedder::new();
+        let norm = (0.5_f32 * 0.5 + 0.5 * 0.5 + 0.5 * 0.5).sqrt();
+        let v = vec![0.5 / norm, 0.5 / norm, 0.5 / norm];
+        embedder.pin("A test force", v.clone());
+        embedder.pin("A tast farce", vec![0.48 / norm, 0.52 / norm, 0.5 / norm]);
+
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let mut engine = Engine::new(cfg, Box::new(embedder)).unwrap();
+
+        let p1 = engine
+            .propose_decision(ProposeInput {
+                title: "First proposal".into(),
+                body: "body".into(),
+                forces: vec![ForceInput::New {
+                    title: "A test force".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        let r1 = engine.commit(p1).unwrap();
+        assert!(!r1.decision_id.is_empty());
+
+        let p2 = engine
+            .propose_decision(ProposeInput {
+                title: "Second proposal".into(),
+                body: "body".into(),
+                forces: vec![ForceInput::New {
+                    title: "A tast farce".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        let r2 = engine.commit(p2).unwrap();
+        assert!(!r2.reused.is_empty());
+    }
+
+    #[test]
+    fn commit_is_append_only() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let pre_hashes = hash_all_files(&_dir);
+
+        let p = engine
+            .propose_decision(ProposeInput {
+                title: "Append only test".into(),
+                body: "body".into(),
+                forces: vec![ForceInput::New {
+                    title: "New force for append test".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        engine.commit(p).unwrap();
+
+        let post_hashes = hash_all_files(&_dir);
+        for (path, pre_hash) in &pre_hashes {
+            assert_eq!(
+                post_hashes.get(path),
+                Some(pre_hash),
+                "file {} was modified!",
+                path
+            );
+        }
     }
 }
