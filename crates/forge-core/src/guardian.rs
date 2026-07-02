@@ -125,6 +125,12 @@ impl Engine {
             }
         }
 
+        for sid in &input.supersedes {
+            if self.snapshot.graph.get(sid).is_none() {
+                problems.push(format!("unknown decision id {}", sid));
+            }
+        }
+
         let decision_id = self.generate_id("d", &input.title);
         let decision = Decision {
             id: decision_id,
@@ -402,10 +408,19 @@ impl Engine {
 }
 
 fn find_record_file(id: &str, cfg: &Config) -> Option<std::path::PathBuf> {
+    let filename = format!("{}.md", id);
     for root in &cfg.roots {
-        let candidate = root.join(format!("{}.md", id));
+        let candidate = root.join(&filename);
         if candidate.exists() {
             return Some(candidate);
+        }
+    }
+    for entry in walkdir::WalkDir::new(&cfg.write_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() && entry.file_name().to_string_lossy() == filename {
+            return Some(entry.path().to_path_buf());
         }
     }
     None
@@ -792,5 +807,62 @@ mod tests {
 
         let receipt = engine.set_status("f-rust-stable", "changed").unwrap();
         assert!(receipt.newly_stale.iter().any(|id| id == "d-use-rust"));
+    }
+
+    #[test]
+    fn supersede_via_propose_commit() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let p = engine
+            .propose_decision(ProposeInput {
+                title: "Supersede test".into(),
+                body: "This supersedes d-use-rust.".into(),
+                forces: vec![ForceInput::Existing {
+                    id: "f-rust-stable".into(),
+                }],
+                supersedes: vec!["d-use-rust".to_string()],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+
+        assert!(
+            p.problems.is_empty(),
+            "superseding a known decision should have no problems"
+        );
+
+        let receipt = engine.commit(p).unwrap();
+        let snap = engine.snapshot();
+
+        assert!(snap.frontier().contains(&receipt.decision_id));
+        assert!(!snap.frontier().contains(&"d-use-rust".to_string()));
+        assert!(snap.verdicts.superseded.contains("d-use-rust"));
+    }
+
+    #[test]
+    fn superseding_unknown_decision_is_a_problem() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let engine = Engine::new(cfg, embedder).unwrap();
+
+        let p = engine
+            .propose_decision(ProposeInput {
+                title: "Bad supersede".into(),
+                body: "body".into(),
+                forces: vec![ForceInput::Existing {
+                    id: "f-rust-stable".into(),
+                }],
+                supersedes: vec!["d-nonexistent".to_string()],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+
+        assert!(!p.problems.is_empty());
+        assert!(p.problems.iter().any(|msg| msg.contains("d-nonexistent")));
     }
 }
