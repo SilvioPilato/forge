@@ -2,7 +2,7 @@ use std::env;
 use std::process;
 
 use forge_core::config::Config;
-use forge_core::embed::NullEmbedder;
+use forge_core::recall::{search, Scope};
 use forge_core::snapshot::Snapshot;
 use serde::Serialize;
 
@@ -33,19 +33,64 @@ struct StaleReportEntry {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: forge-inspect <path/to/forge.toml> [--json]");
+        eprintln!("Usage: forge-inspect <path/to/forge.toml> [--json] [--search \"query\" [--scope force|decision|both]]");
         process::exit(1);
     }
 
     let config_path = &args[1];
-    let as_json = args.get(2).is_some_and(|a| a == "--json");
+    let as_json = args.iter().any(|a| a == "--json");
+
+    let search_idx = args.iter().position(|a| a == "--search");
+    let scope_idx = args.iter().position(|a| a == "--scope");
+
+    let search_query = search_idx.and_then(|i| args.get(i + 1).cloned());
+    let scope_str = scope_idx.and_then(|i| args.get(i + 1).cloned());
+
+    let scope = match scope_str.as_deref() {
+        Some("force") => Scope::Force,
+        Some("decision") => Scope::Decision,
+        Some("both") | None => Scope::Both,
+        Some(other) => {
+            eprintln!("Unknown scope: {}. Use force, decision, or both.", other);
+            process::exit(1);
+        }
+    };
 
     let cfg = Config::load(std::path::Path::new(config_path)).unwrap_or_else(|e| {
         eprintln!("Failed to load config: {}", e);
         process::exit(1);
     });
 
-    let embedder = NullEmbedder;
+    if let Some(query) = search_query {
+        let embedder = forge_core::embed::default_embedder(&cfg).unwrap_or_else(|e| {
+            eprintln!("Failed to create embedder: {}", e);
+            process::exit(1);
+        });
+        let snap = Snapshot::build(&cfg, embedder.as_ref()).unwrap_or_else(|e| {
+            eprintln!("Failed to build snapshot: {}", e);
+            process::exit(1);
+        });
+        let hits = search(&snap, embedder.as_ref(), &query, scope, 20).unwrap_or_else(|e| {
+            eprintln!("Search failed: {}", e);
+            process::exit(1);
+        });
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&hits).unwrap());
+        } else if hits.is_empty() {
+            println!("No results.");
+        } else {
+            println!("{:<20} {:<50} {:<8} {:<10}", "ID", "TITLE", "SCORE", "KIND");
+            for h in &hits {
+                println!(
+                    "{:<20} {:<50} {:<8.4} {:<10}",
+                    h.id, h.title, h.score, h.kind
+                );
+            }
+        }
+        return;
+    }
+
+    let embedder = forge_core::embed::NullEmbedder;
     let snap = Snapshot::build(&cfg, &embedder).unwrap_or_else(|e| {
         eprintln!("Failed to build snapshot: {}", e);
         process::exit(1);

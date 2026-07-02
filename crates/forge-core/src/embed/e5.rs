@@ -7,7 +7,10 @@ pub struct E5Embedder {
 
 #[cfg(feature = "onnx")]
 impl E5Embedder {
-    pub fn load(cache_dir: &std::path::Path, model_id: &str) -> Result<E5Embedder, super::EmbedError> {
+    pub fn load(
+        cache_dir: &std::path::Path,
+        model_id: &str,
+    ) -> Result<E5Embedder, super::EmbedError> {
         let cache = hf_hub::Cache::new(cache_dir.join("models"));
         let api = hf_hub::api::sync::ApiBuilder::from_cache(cache)
             .with_progress(false)
@@ -15,9 +18,11 @@ impl E5Embedder {
             .map_err(|e| super::EmbedError(format!("hf-hub api: {e}")))?;
         let repo = api.model(model_id.to_string());
 
-        let onnx_path = repo.get("onnx/model.onnx")
+        let onnx_path = repo
+            .get("onnx/model.onnx")
             .map_err(|e| super::EmbedError(format!("download model.onnx: {e}")))?;
-        let tokenizer_path = repo.get("tokenizer.json")
+        let tokenizer_path = repo
+            .get("tokenizer.json")
             .map_err(|e| super::EmbedError(format!("download tokenizer.json: {e}")))?;
 
         let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
@@ -48,7 +53,11 @@ impl E5Embedder {
         })
     }
 
-    fn embed_batch(&self, texts: &[String], prefix: &str) -> Result<Vec<super::Vector>, super::EmbedError> {
+    fn embed_batch(
+        &self,
+        texts: &[String],
+        prefix: &str,
+    ) -> Result<Vec<super::Vector>, super::EmbedError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -58,7 +67,9 @@ impl E5Embedder {
         for chunk in texts.chunks(16) {
             let prefixed: Vec<String> = chunk.iter().map(|t| format!("{prefix}{t}")).collect();
 
-            let encodings = self.tokenizer.encode_batch(prefixed, false)
+            let encodings = self
+                .tokenizer
+                .encode_batch(prefixed, false)
                 .map_err(|e| super::EmbedError(format!("tokenize: {e}")))?;
 
             let batch_size = encodings.len();
@@ -83,26 +94,32 @@ impl E5Embedder {
             // Retain mask data for mean pooling after tensors consume the Vecs
             let mask_data = flat_mask.clone();
 
-            let input_ids = ort::value::Tensor::from_array((shape.clone(), flat_ids.into_boxed_slice()))
-                .map_err(|e| super::EmbedError(format!("create input_ids: {e}")))?;
-            let attention_mask = ort::value::Tensor::from_array((shape.clone(), flat_mask.into_boxed_slice()))
-                .map_err(|e| super::EmbedError(format!("create attention_mask: {e}")))?;
-            let token_type_ids = ort::value::Tensor::from_array((shape.clone(), flat_type_ids.into_boxed_slice()))
-                .map_err(|e| super::EmbedError(format!("create token_type_ids: {e}")))?;
+            let input_ids =
+                ort::value::Tensor::from_array((shape.clone(), flat_ids.into_boxed_slice()))
+                    .map_err(|e| super::EmbedError(format!("create input_ids: {e}")))?;
+            let attention_mask =
+                ort::value::Tensor::from_array((shape.clone(), flat_mask.into_boxed_slice()))
+                    .map_err(|e| super::EmbedError(format!("create attention_mask: {e}")))?;
+            let token_type_ids =
+                ort::value::Tensor::from_array((shape.clone(), flat_type_ids.into_boxed_slice()))
+                    .map_err(|e| super::EmbedError(format!("create token_type_ids: {e}")))?;
 
             let mut session = self.session.lock().unwrap();
-            let outputs = session.run(ort::inputs![
-                "input_ids" => input_ids,
-                "attention_mask" => attention_mask,
-                "token_type_ids" => token_type_ids,
-            ]).map_err(|e| super::EmbedError(format!("inference: {e}")))?;
+            let outputs = session
+                .run(ort::inputs![
+                    "input_ids" => input_ids,
+                    "attention_mask" => attention_mask,
+                    "token_type_ids" => token_type_ids,
+                ])
+                .map_err(|e| super::EmbedError(format!("inference: {e}")))?;
 
             let (_shape, hidden_data): (_, &[f32]) = outputs["last_hidden_state"]
                 .try_extract_tensor()
                 .map_err(|e| super::EmbedError(format!("extract last_hidden_state: {e}")))?;
 
             let hidden_size = hidden_data.len() / (batch_size * seq_len);
-            let mut chunk_embeddings = Self::mean_pool(hidden_data, &mask_data, batch_size, seq_len, hidden_size);
+            let mut chunk_embeddings =
+                Self::mean_pool(hidden_data, &mask_data, batch_size, seq_len, hidden_size);
 
             for emb in &mut chunk_embeddings {
                 Self::l2_normalize(emb);
@@ -191,6 +208,9 @@ mod tests {
         let p2 = e.embed_passages(&["the sky is blue".into()]).unwrap();
         let sim1 = super::super::cosine(&q, &p1[0]);
         let sim2 = super::super::cosine(&q, &p2[0]);
-        assert!(sim1 > sim2, "cross-lingual match should rank higher: {sim1} vs {sim2}");
+        assert!(
+            sim1 > sim2,
+            "cross-lingual match should rank higher: {sim1} vs {sim2}"
+        );
     }
 }

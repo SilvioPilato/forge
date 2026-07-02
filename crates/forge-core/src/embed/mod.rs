@@ -57,6 +57,9 @@ pub fn default_embedder(cfg: &crate::config::Config) -> Result<Box<dyn Embedder>
         #[cfg(feature = "onnx")]
         other => Ok(Box::new(e5::E5Embedder::load(&cfg.cache_dir, other)?)),
         #[cfg(not(feature = "onnx"))]
-        other => Err(EmbedError(format!("unknown model '{}' (onnx feature not enabled)", other))),
+        other => Err(EmbedError(format!(
+            "unknown model '{}' (onnx feature not enabled)",
+            other
+        ))),
     }
 }

@@ -4,5 +4,6 @@ pub mod embed;
 pub mod graph;
 pub mod judge;
 pub mod linker;
+pub mod recall;
 pub mod record;
 pub mod snapshot;
