@@ -335,7 +335,7 @@ impl ForgeServer {
     }
 
     #[tool(
-        description = "Commit a proposed decision to disk. Call only after the user has assented in conversation. Writes force and decision files, then synchronously rebuilds the index."
+        description = "Commit a proposed decision to disk. Call only after the user has assented in conversation. Writes force and decision files, then synchronously rebuilds the index. To backfill a historical decision, edit `decision.date` (YYYY-MM-DD) on the proposed object before committing — it is the only honored edit; anything else requires a fresh propose_decision."
     )]
     async fn commit(&self, Parameters(params): Parameters<CommitParams>) -> String {
         let proposed: forge_core::guardian::Proposed =

@@ -166,6 +166,14 @@ impl Engine {
             return Err(format!("invalid: {}", re_proposed.problems.join("; ")));
         }
 
+        let date = proposed.decision.date.clone();
+        if chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() {
+            return Err(format!(
+                "invalid decision date '{}' (expected YYYY-MM-DD)",
+                date
+            ));
+        }
+
         let mut created_force_ids = Vec::new();
         let mut reused = Vec::new();
         let mut warnings = Vec::new();
@@ -262,6 +270,7 @@ impl Engine {
 
         let mut decision = re_proposed.decision.clone();
         decision.cites = decision_cites;
+        decision.date = date;
         let content = crate::record::serialize_decision(&decision);
         let path = write_decisions_dir.join(format!("{}.md", decision.id));
         std::fs::write(&path, &content).map_err(|e| format!("write decision: {}", e))?;
@@ -906,5 +915,62 @@ mod tests {
 
         assert!(!p.problems.is_empty());
         assert!(p.problems.iter().any(|msg| msg.contains("d-nonexistent")));
+    }
+
+    #[test]
+    fn commit_honors_edited_decision_date() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let mut p = engine
+            .propose_decision(ProposeInput {
+                title: "Backfilled decision".into(),
+                body: "Made in the past, recorded today.".into(),
+                forces: vec![ForceInput::New {
+                    title: "A historical force".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        assert_eq!(p.decision.date, today_iso());
+        p.decision.date = "2026-06-10".into();
+
+        let receipt = engine.commit(p).unwrap();
+        let snap = engine.snapshot();
+        match snap.graph.get(&receipt.decision_id) {
+            Some(crate::graph::Record::Decision(d)) => assert_eq!(d.date, "2026-06-10"),
+            other => panic!("expected decision, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn commit_rejects_malformed_decision_date() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let mut p = engine
+            .propose_decision(ProposeInput {
+                title: "Bad date decision".into(),
+                body: "body".into(),
+                forces: vec![ForceInput::Existing {
+                    id: "f-rust-stable".into(),
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        p.decision.date = "next tuesday".into();
+
+        let err = engine.commit(p).unwrap_err();
+        assert!(err.contains("invalid decision date"), "got: {err}");
     }
 }
