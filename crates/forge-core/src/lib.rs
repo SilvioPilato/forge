@@ -4,6 +4,7 @@ pub mod embed;
 pub mod graph;
 pub mod guardian;
 pub mod judge;
+pub mod logging;
 pub mod linker;
 pub mod recall;
 pub mod record;
