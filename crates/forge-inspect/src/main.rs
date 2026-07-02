@@ -35,8 +35,7 @@ struct StaleReportEntry {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        init_subscriber("info", "pretty", None);
-        error!("Usage: forge-inspect <path/to/forge.toml> [--json] [--search \"query\" [--scope force|decision|both]]");
+        eprintln!("Usage: forge-inspect <path/to/forge.toml> [--json] [--search \"query\" [--scope force|decision|both]]");
         process::exit(1);
     }
 
@@ -54,16 +53,22 @@ fn main() {
         Some("decision") => Scope::Decision,
         Some("both") | None => Scope::Both,
         Some(other) => {
-            error!(scope = %other, "Unknown scope. Use force, decision, or both.");
+            eprintln!("Unknown scope: {}. Use force, decision, or both.", other);
             process::exit(1);
         }
     };
 
-    let cfg = Config::load(std::path::Path::new(config_path)).unwrap_or_else(|e| {
-        error!("Failed to load config: {}", e);
-        process::exit(1);
-    });
-    init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
+    let cfg = match Config::load(std::path::Path::new(config_path)) {
+        Ok(c) => {
+            init_subscriber(&c.log.level, &c.log.format, c.log.file.as_ref());
+            c
+        }
+        Err(e) => {
+            init_subscriber("info", "pretty", None);
+            error!("Failed to load config: {}", e);
+            process::exit(1);
+        }
+    };
 
     if let Some(query) = search_query {
         let embedder = forge_core::embed::default_embedder(&cfg).unwrap_or_else(|e| {
