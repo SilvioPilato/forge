@@ -3,6 +3,7 @@ use crate::graph::Record;
 use crate::record::ForceStatus;
 use crate::snapshot::Snapshot;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, instrument};
 
 #[derive(Debug, Clone)]
 pub enum Scope {
@@ -21,6 +22,7 @@ pub struct Hit {
     pub superseded_by: Option<String>,
 }
 
+#[instrument(skip(snap, embedder), fields(query = %query, scope = ?scope, limit = limit))]
 pub fn search(
     snap: &Snapshot,
     embedder: &dyn Embedder,
@@ -85,9 +87,11 @@ pub fn search(
     if limit > 0 && hits.len() > limit {
         hits.truncate(limit);
     }
+    debug!(hits = hits.len(), "search complete");
     Ok(hits)
 }
 
+#[instrument(skip(snap, embedder), fields(force_title = %force_title, warn = warn))]
 pub fn near_matches(
     snap: &Snapshot,
     embedder: &dyn Embedder,
@@ -122,5 +126,6 @@ pub fn near_matches(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.id.cmp(&b.id))
     });
+    debug!(matches = hits.len(), "near matches computed");
     Ok(hits)
 }

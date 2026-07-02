@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
+use tracing::{debug, instrument};
+
 use crate::linker::Diagnostic;
 
 /// Walk roots, find candidate .md files by checking for frontmatter with `type:` field.
 /// Returns (paths, diagnostics). Paths are sorted deterministically.
+#[instrument]
 pub fn discover(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<Diagnostic>) {
     let mut paths = Vec::new();
     let mut diagnostics = Vec::new();
@@ -13,6 +16,7 @@ pub fn discover(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<Diagnostic>) {
             diagnostics.push(Diagnostic::MissingRoot { path: root.clone() });
             continue;
         }
+        let before = paths.len();
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -30,9 +34,12 @@ pub fn discover(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<Diagnostic>) {
                 }
             }
         }
+        let count = paths.len() - before;
+        debug!(root = %root.display(), count = count, "discovered records under root");
     }
 
     paths.sort();
+    debug!(total = paths.len(), "discovery complete");
     (paths, diagnostics)
 }
 

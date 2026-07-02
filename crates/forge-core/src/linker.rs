@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use tracing::{instrument, warn};
+
 use crate::record::{Decision, Force, Parsed};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +43,7 @@ pub struct Linked {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+#[instrument(skip(parsed))]
 pub fn link(parsed: Vec<Parsed>) -> Linked {
     let mut diagnostics = Vec::new();
 
@@ -94,12 +97,14 @@ pub fn link(parsed: Vec<Parsed>) -> Linked {
     }
 
     for (id, paths) in collision_groups {
+        warn!(collision = %id, paths = ?paths, "id collision detected");
         diagnostics.push(Diagnostic::IdCollision { id, paths });
     }
 
     for d in &decisions_kept {
         for cite in &d.cites {
             if !id_map.contains_key(cite) {
+                warn!(from = %d.id, field = ?RefField::Cites, to = %cite, "dangling reference");
                 diagnostics.push(Diagnostic::DanglingRef {
                     from: d.id.clone(),
                     field: RefField::Cites,
@@ -109,6 +114,7 @@ pub fn link(parsed: Vec<Parsed>) -> Linked {
         }
         for s in &d.supersedes {
             if !id_map.contains_key(s) {
+                warn!(from = %d.id, field = ?RefField::Supersedes, to = %s, "dangling reference");
                 diagnostics.push(Diagnostic::DanglingRef {
                     from: d.id.clone(),
                     field: RefField::Supersedes,
@@ -118,6 +124,7 @@ pub fn link(parsed: Vec<Parsed>) -> Linked {
         }
         for r in &d.relates {
             if !id_map.contains_key(r) {
+                warn!(from = %d.id, field = ?RefField::Relates, to = %r, "dangling reference");
                 diagnostics.push(Diagnostic::DanglingRef {
                     from: d.id.clone(),
                     field: RefField::Relates,
@@ -130,6 +137,7 @@ pub fn link(parsed: Vec<Parsed>) -> Linked {
     for f in &forces_kept {
         for dep in &f.depends_on {
             if !id_map.contains_key(dep) {
+                warn!(from = %f.id, field = ?RefField::DependsOn, to = %dep, "dangling reference");
                 diagnostics.push(Diagnostic::DanglingRef {
                     from: f.id.clone(),
                     field: RefField::DependsOn,
@@ -139,6 +147,7 @@ pub fn link(parsed: Vec<Parsed>) -> Linked {
         }
         if let Some(ref sb) = f.superseded_by {
             if !id_map.contains_key(sb) {
+                warn!(from = %f.id, field = ?RefField::SupersededBy, to = %sb, "dangling reference");
                 diagnostics.push(Diagnostic::DanglingRef {
                     from: f.id.clone(),
                     field: RefField::SupersededBy,
@@ -183,6 +192,7 @@ fn detect_cycles(forces: &[Force], diagnostics: &mut Vec<Diagnostic>) {
     let mut cycles_sorted: Vec<Vec<String>> = cycles.into_iter().collect();
     cycles_sorted.sort();
     for cycle in cycles_sorted {
+        warn!(cycle = ?cycle, "dependency cycle detected");
         diagnostics.push(Diagnostic::DependsOnCycle { members: cycle });
     }
 }

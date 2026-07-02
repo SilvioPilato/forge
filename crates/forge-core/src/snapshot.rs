@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use tracing::{info, instrument};
+
 use crate::config::Config;
 use crate::discovery;
 use crate::embed::cache::VectorCache;
@@ -35,6 +37,7 @@ pub struct WhyEntry {
 }
 
 impl Snapshot {
+    #[instrument(skip(cfg, embedder), fields(roots = ?cfg.roots))]
     pub fn build(cfg: &Config, embedder: &dyn Embedder) -> Result<Snapshot, BuildError> {
         let (paths, mut diagnostics) = discovery::discover(&cfg.roots);
         let parsed: Vec<_> = paths
@@ -88,6 +91,14 @@ impl Snapshot {
         }
 
         let _ = cache.save();
+
+        info!(
+            decisions = graph.decisions().len(),
+            forces = graph.forces().len(),
+            diagnostics = diagnostics.len(),
+            frontier = verdicts.frontier.len(),
+            "snapshot built"
+        );
 
         Ok(Snapshot {
             graph,

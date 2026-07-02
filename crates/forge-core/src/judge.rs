@@ -2,6 +2,7 @@ use crate::graph::Graph;
 use crate::graph::Record;
 use crate::record::{DecisionStatus, ForceStatus};
 use std::collections::{HashMap, HashSet, VecDeque};
+use tracing::{debug, instrument};
 
 #[derive(Debug)]
 pub struct FallenPremise {
@@ -23,6 +24,7 @@ pub struct Verdicts {
     pub frontier: Vec<String>,
 }
 
+#[instrument(skip(graph))]
 pub fn judge(graph: &Graph) -> Verdicts {
     let mut premise: HashMap<String, PremiseVerdict> = HashMap::new();
     for d in graph.decisions() {
@@ -121,6 +123,8 @@ pub fn judge(graph: &Graph) -> Verdicts {
         .collect();
     let mut frontier: Vec<String> = frontier_ids.drain().collect();
     frontier.sort();
+
+    debug!(frontier = frontier.len(), stale_count = premise.values().filter(|v| matches!(v, PremiseVerdict::Stale { .. })).count(), "staleness propagation complete");
 
     Verdicts {
         premise,

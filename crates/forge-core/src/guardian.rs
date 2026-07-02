@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tracing::{debug, info, instrument, warn};
+
 use crate::config::Config;
 use crate::embed::{EmbedError, Embedder};
 use crate::recall::Hit;
@@ -155,6 +157,7 @@ impl Engine {
         })
     }
 
+    #[instrument(skip(self), fields(write_dir = %self.cfg.write_dir.display()))]
     pub fn commit(&mut self, proposed: Proposed) -> Result<Receipt, String> {
         let re_proposed = self
             .propose_decision(proposed.input.clone())
@@ -266,6 +269,9 @@ impl Engine {
         self.rebuild()
             .map_err(|e| format!("rebuild after commit: {}", e))?;
 
+        info!(decision_id = %decision.id, force_count = created_force_ids.len(), "decision committed");
+        debug!(force_ids = ?created_force_ids, "forces written");
+
         Ok(Receipt {
             decision_id: decision.id,
             created_force_ids,
@@ -296,6 +302,7 @@ impl Engine {
         id
     }
 
+    #[instrument(skip(self))]
     pub fn set_status(&mut self, id: &str, new_status: &str) -> Result<StatusReceipt, String> {
         let old_stale_ids: std::collections::HashSet<String> = self
             .snapshot
@@ -398,6 +405,8 @@ impl Engine {
             .map(|e| e.decision_id.clone())
             .collect();
         let newly_stale: Vec<String> = new_stale_ids.difference(&old_stale_ids).cloned().collect();
+
+        info!(id = %id, status = %new_status, impacted = newly_stale.len(), "status set");
 
         Ok(StatusReceipt {
             id: id.to_string(),
