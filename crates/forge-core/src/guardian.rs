@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use crate::config::Config;
 use crate::embed::{EmbedError, Embedder};
