@@ -51,15 +51,17 @@ struct MCPClient {
 }
 
 impl MCPClient {
-    fn new(config_path: &str) -> Self {
+    fn new_with_env(config_path: &str, envs: &[(&str, &str)]) -> Self {
         let bin = env!("CARGO_BIN_EXE_forge-mcp");
-        let mut child = Command::new(bin)
-            .arg(config_path)
+        let mut cmd = Command::new(bin);
+        cmd.arg(config_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::inherit());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         MCPClient {
@@ -68,6 +70,10 @@ impl MCPClient {
             reader: BufReader::new(stdout),
             next_id: 1,
         }
+    }
+
+    fn new(config_path: &str) -> Self {
+        Self::new_with_env(config_path, &[])
     }
 
     fn new_empty(cwd: &Path) -> Self {
@@ -103,9 +109,16 @@ impl MCPClient {
         self.stdin.write_all(line.as_bytes()).unwrap();
         self.stdin.flush().unwrap();
 
-        let mut response = String::new();
-        self.reader.read_line(&mut response).unwrap();
-        serde_json::from_str(&response).unwrap()
+        loop {
+            let mut response = String::new();
+            self.reader.read_line(&mut response).unwrap();
+            let v: Value = serde_json::from_str(&response).unwrap();
+            // skip server→client notifications (they have no "id")
+            if v.get("id").is_none() {
+                continue;
+            }
+            return v;
+        }
     }
 
     fn initialize(&mut self) -> Value {
@@ -130,6 +143,19 @@ impl MCPClient {
     }
 }
 
+fn wait_ready(client: &mut MCPClient) {
+    for _ in 0..150 {
+        let resp = client.call_tool("stale_report", serde_json::json!({}));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let v: Value = serde_json::from_str(text).unwrap();
+        if v.get("status").and_then(|s| s.as_str()) != Some("loading") {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("server never became ready");
+}
+
 impl Drop for MCPClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -149,6 +175,8 @@ fn acceptance_spec_10_e2e() {
         "initialize failed: {}",
         init_resp
     );
+
+    wait_ready(&mut client);
 
     let propose_resp = client.call_tool(
         "propose_decision",
@@ -350,6 +378,8 @@ fn acceptance_spec_13_reindex_picks_up_manual_edits() {
     let mut client = MCPClient::new(&config_path);
     client.initialize();
 
+    wait_ready(&mut client);
+
     let propose_resp = client.call_tool(
         "propose_decision",
         serde_json::json!({
@@ -390,4 +420,46 @@ fn acceptance_spec_13_reindex_picks_up_manual_edits() {
     let get_text = get_resp["result"]["content"][0]["text"].as_str().unwrap();
     let record: Value = serde_json::from_str(get_text).unwrap();
     assert_eq!(record["date"], "2026-06-10");
+}
+
+#[test]
+fn acceptance_spec_14_handshake_completes_before_engine_ready() {
+    let corpus = temp_corpus_named("forge-mcp-slow-load-test");
+    let config_path = corpus.join("forge.toml").to_string_lossy().to_string();
+    let mut client =
+        MCPClient::new_with_env(&config_path, &[("FORGE_TEST_LOAD_DELAY_MS", "2000")]);
+
+    let t0 = std::time::Instant::now();
+    let init_resp = client.initialize();
+    assert!(
+        init_resp.get("result").is_some(),
+        "initialize failed: {init_resp}"
+    );
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(1500),
+        "handshake blocked on engine load: {:?}",
+        t0.elapsed()
+    );
+
+    // while loading, tools answer with a loading status instead of blocking
+    let search_resp = client.call_tool(
+        "search",
+        serde_json::json!({"query": "rust", "scope": "both", "limit": 5}),
+    );
+    let text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let v: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(v["status"], "loading", "got: {v}");
+
+    // and eventually the corpus becomes available
+    wait_ready(&mut client);
+    let search_resp = client.call_tool(
+        "search",
+        serde_json::json!({"query": "rust", "scope": "both", "limit": 5}),
+    );
+    let text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let v: Value = serde_json::from_str(text).unwrap();
+    assert!(
+        !v["hits"].as_array().unwrap().is_empty(),
+        "expected hits after load: {v}"
+    );
 }
