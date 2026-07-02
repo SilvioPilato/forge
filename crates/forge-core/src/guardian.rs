@@ -289,6 +289,126 @@ impl Engine {
         }
         id
     }
+
+    pub fn set_status(&mut self, id: &str, new_status: &str) -> Result<StatusReceipt, String> {
+        let old_stale_ids: std::collections::HashSet<String> = self
+            .snapshot
+            .stale_report()
+            .iter()
+            .map(|e| e.decision_id.clone())
+            .collect();
+
+        let record = self
+            .snapshot
+            .graph
+            .get(id)
+            .ok_or_else(|| format!("unknown id: {}", id))?;
+
+        match record {
+            crate::graph::Record::Force(_f) => {
+                let new_fstatus = match new_status {
+                    "changed" => ForceStatus::Changed,
+                    "retired" => ForceStatus::Retired,
+                    "holds" => return Err(
+                        "force status cannot be set to 'holds' (only forward transitions allowed)"
+                            .to_string(),
+                    ),
+                    _ => return Err(format!("unknown force status: {}", new_status)),
+                };
+
+                let path = find_record_file(id, &self.cfg)
+                    .ok_or_else(|| format!("file not found for: {}", id))?;
+                let content =
+                    std::fs::read_to_string(&path).map_err(|e| format!("read error: {}", e))?;
+                let parsed = crate::record::parse(&path, &content);
+                match parsed {
+                    crate::record::Parsed::Force(mut force) => {
+                        let current = force.current_status();
+                        let legal = matches!(
+                            (current, new_fstatus),
+                            (ForceStatus::Holds, ForceStatus::Changed)
+                                | (ForceStatus::Holds, ForceStatus::Retired)
+                                | (ForceStatus::Changed, ForceStatus::Retired)
+                        );
+                        if !legal {
+                            return Err(format!(
+                                "illegal transition: {:?} -> {}",
+                                current, new_status
+                            ));
+                        }
+
+                        force.status_log.push(StatusEntry {
+                            status: new_fstatus,
+                            since: today_iso(),
+                        });
+
+                        let serialized = crate::record::serialize_force(&force);
+                        std::fs::write(&path, &serialized)
+                            .map_err(|e| format!("write error: {}", e))?;
+                    }
+                    _ => return Err(format!("record {} is not a force", id)),
+                }
+            }
+            crate::graph::Record::Decision(_d) => match new_status {
+                "deprecated" => {
+                    let path = find_record_file(id, &self.cfg)
+                        .ok_or_else(|| format!("file not found for: {}", id))?;
+                    let content =
+                        std::fs::read_to_string(&path).map_err(|e| format!("read error: {}", e))?;
+                    let parsed = crate::record::parse(&path, &content);
+                    match parsed {
+                        crate::record::Parsed::Decision(mut decision) => {
+                            if decision.status != DecisionStatus::Accepted {
+                                return Err(format!(
+                                    "only accepted decisions can be deprecated, current: {:?}",
+                                    decision.status
+                                ));
+                            }
+                            decision.status = DecisionStatus::Deprecated;
+                            decision.date = today_iso();
+                            let serialized = crate::record::serialize_decision(&decision);
+                            std::fs::write(&path, &serialized)
+                                .map_err(|e| format!("write error: {}", e))?;
+                        }
+                        _ => return Err(format!("record {} is not a decision", id)),
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "decision status can only be set to 'deprecated', got: {}",
+                        new_status
+                    ))
+                }
+            },
+        }
+
+        self.rebuild()
+            .map_err(|e| format!("rebuild error: {}", e))?;
+
+        let new_stale_ids: std::collections::HashSet<String> = self
+            .snapshot
+            .stale_report()
+            .iter()
+            .map(|e| e.decision_id.clone())
+            .collect();
+        let newly_stale: Vec<String> = new_stale_ids.difference(&old_stale_ids).cloned().collect();
+
+        Ok(StatusReceipt {
+            id: id.to_string(),
+            new_status: new_status.to_string(),
+            newly_stale,
+        })
+    }
+}
+
+fn find_record_file(id: &str, cfg: &Config) -> Option<std::path::PathBuf> {
+    for root in &cfg.roots {
+        let candidate = root.join(format!("{}.md", id));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -311,6 +431,12 @@ pub struct ReusedEntry {
     pub proposed_id: String,
     pub existing_id: String,
     pub score: f32,
+}
+
+pub struct StatusReceipt {
+    pub id: String,
+    pub new_status: String,
+    pub newly_stale: Vec<String>,
 }
 
 #[cfg(test)]
@@ -624,5 +750,47 @@ mod tests {
                 path
             );
         }
+    }
+
+    #[test]
+    fn force_set_status_appends_to_log() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let receipt = engine.set_status("f-rust-stable", "changed").unwrap();
+        assert_eq!(receipt.id, "f-rust-stable");
+        assert_eq!(receipt.new_status, "changed");
+        let snap = engine.snapshot();
+        if let Some(crate::graph::Record::Force(f)) = snap.graph.get("f-rust-stable") {
+            assert_eq!(f.current_status(), crate::record::ForceStatus::Changed);
+        } else {
+            panic!("f-rust-stable not found");
+        }
+    }
+
+    #[test]
+    fn illegal_transitions_rejected() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        assert!(engine.set_status("f-retired-old", "holds").is_err());
+        assert!(engine.set_status("f-onnx-portable", "retired").is_ok());
+        assert!(engine.set_status("f-onnx-portable", "holds").is_err());
+        assert!(engine.set_status("f-nonexistent", "changed").is_err());
+    }
+
+    #[test]
+    fn set_status_returns_propagation_impact() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let receipt = engine.set_status("f-rust-stable", "changed").unwrap();
+        assert!(receipt.newly_stale.iter().any(|id| id == "d-use-rust"));
     }
 }
