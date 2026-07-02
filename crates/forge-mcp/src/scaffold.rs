@@ -30,7 +30,23 @@ pub fn init(dir: &Path) -> Result<PathBuf, String> {
         std::fs::create_dir_all(&d)
             .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
     }
-    std::fs::write(&config_path, FORGE_TOML_TEMPLATE)
+    // create_new closes the race window between the exists() check above
+    // and this write: creation fails atomically if the file appeared since.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&config_path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "{} already exists; refusing to overwrite",
+                    config_path.display()
+                )
+            } else {
+                format!("cannot write {}: {e}", config_path.display())
+            }
+        })?;
+    std::io::Write::write_all(&mut f, FORGE_TOML_TEMPLATE.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", config_path.display()))?;
     Ok(config_path)
 }
@@ -72,5 +88,8 @@ mod tests {
         assert!(err.contains("already exists"), "got: {err}");
         let content = std::fs::read_to_string(tmp.path().join("forge.toml")).unwrap();
         assert_eq!(content, "# existing");
+        // A refusal must leave the target untouched beyond the dir itself.
+        assert!(!tmp.path().join("decisions").exists());
+        assert!(!tmp.path().join("forces").exists());
     }
 }
