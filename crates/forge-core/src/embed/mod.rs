@@ -1,6 +1,9 @@
 pub mod cache;
 pub mod fake;
 
+#[cfg(feature = "onnx")]
+pub mod e5;
+
 pub type Vector = Vec<f32>;
 
 pub trait Embedder: Send + Sync {
@@ -44,5 +47,16 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         0.0
     } else {
         dot / (na * nb)
+    }
+}
+
+pub fn default_embedder(cfg: &crate::config::Config) -> Result<Box<dyn Embedder>, EmbedError> {
+    match cfg.embedding.model.as_str() {
+        "fake-bucket" => Ok(Box::new(fake::BucketEmbedder::default())),
+        "fake-pinned" => Ok(Box::new(fake::PinnedEmbedder::new())),
+        #[cfg(feature = "onnx")]
+        other => Ok(Box::new(e5::E5Embedder::load(&cfg.cache_dir, other)?)),
+        #[cfg(not(feature = "onnx"))]
+        other => Err(EmbedError(format!("unknown model '{}' (onnx feature not enabled)", other))),
     }
 }

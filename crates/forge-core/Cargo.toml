@@ -12,7 +12,11 @@ walkdir.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+ort = { version = "2.0.0-rc.12", optional = true }
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4", optional = true }
+ndarray = { version = "0.16", optional = true }
 
 [features]
 default = []
-onnx = []
+onnx = ["dep:ort", "dep:tokenizers", "dep:hf-hub", "dep:ndarray"]
