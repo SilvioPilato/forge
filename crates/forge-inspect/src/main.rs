@@ -2,9 +2,11 @@ use std::env;
 use std::process;
 
 use forge_core::config::Config;
+use forge_core::logging::init_subscriber;
 use forge_core::recall::{search, Scope};
 use forge_core::snapshot::Snapshot;
 use serde::Serialize;
+use tracing::error;
 
 #[derive(Serialize)]
 struct InspectReport {
@@ -33,7 +35,8 @@ struct StaleReportEntry {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: forge-inspect <path/to/forge.toml> [--json] [--search \"query\" [--scope force|decision|both]]");
+        init_subscriber("info", "pretty", None);
+        error!("Usage: forge-inspect <path/to/forge.toml> [--json] [--search \"query\" [--scope force|decision|both]]");
         process::exit(1);
     }
 
@@ -51,27 +54,28 @@ fn main() {
         Some("decision") => Scope::Decision,
         Some("both") | None => Scope::Both,
         Some(other) => {
-            eprintln!("Unknown scope: {}. Use force, decision, or both.", other);
+            error!(scope = %other, "Unknown scope. Use force, decision, or both.");
             process::exit(1);
         }
     };
 
     let cfg = Config::load(std::path::Path::new(config_path)).unwrap_or_else(|e| {
-        eprintln!("Failed to load config: {}", e);
+        error!("Failed to load config: {}", e);
         process::exit(1);
     });
+    init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
 
     if let Some(query) = search_query {
         let embedder = forge_core::embed::default_embedder(&cfg).unwrap_or_else(|e| {
-            eprintln!("Failed to create embedder: {}", e);
+            error!("Failed to create embedder: {}", e);
             process::exit(1);
         });
         let snap = Snapshot::build(&cfg, embedder.as_ref()).unwrap_or_else(|e| {
-            eprintln!("Failed to build snapshot: {}", e);
+            error!("Failed to build snapshot: {}", e);
             process::exit(1);
         });
         let hits = search(&snap, embedder.as_ref(), &query, scope, 20).unwrap_or_else(|e| {
-            eprintln!("Search failed: {}", e);
+            error!("Search failed: {}", e);
             process::exit(1);
         });
         if as_json {
@@ -92,7 +96,7 @@ fn main() {
 
     let embedder = forge_core::embed::NullEmbedder;
     let snap = Snapshot::build(&cfg, &embedder).unwrap_or_else(|e| {
-        eprintln!("Failed to build snapshot: {}", e);
+        error!("Failed to build snapshot: {}", e);
         process::exit(1);
     });
 
