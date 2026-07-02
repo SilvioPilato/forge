@@ -55,5 +55,5 @@ pub fn init_subscriber(level: &str, format: &str, log_file: Option<&PathBuf>) {
         .with(stderr_layer)
         .with(file_layer)
         .try_init()
-        .ok();
+        .unwrap_or_else(|e| eprintln!("tracing subscriber already set: {e}"));
 }
