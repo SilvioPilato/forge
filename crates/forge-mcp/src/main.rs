@@ -373,6 +373,72 @@ impl ForgeServer {
             Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
         }
     }
+
+    #[tool(
+        description = "Scaffold a forge corpus (forge.toml + decisions/ + forces/) in this project's root and load it. Call only after the user has assented. Refuses to overwrite an existing forge.toml."
+    )]
+    async fn init(&self) -> String {
+        let mut engine = self.engine.lock().await;
+        if engine.is_some() {
+            return serde_json::to_string(&serde_json::json!({
+                "status": "already loaded",
+            }))
+            .unwrap();
+        }
+
+        let config_path = match scaffold::ensure_corpus(&self.project_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                return serde_json::to_string(&serde_json::json!({
+                    "error": format!("failed to scaffold corpus: {e}"),
+                }))
+                .unwrap();
+            }
+        };
+
+        let cfg = match Config::load(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return serde_json::to_string(&serde_json::json!({
+                    "error": format!("failed to load config: {e}"),
+                }))
+                .unwrap();
+            }
+        };
+
+        let embedder = match default_embedder(&cfg) {
+            Ok(e) => e,
+            Err(e) => {
+                return serde_json::to_string(&serde_json::json!({
+                    "error": format!("failed to create embedder: {}", e.0),
+                }))
+                .unwrap();
+            }
+        };
+
+        let new_engine = match Engine::new(cfg, embedder) {
+            Ok(e) => e,
+            Err(e) => {
+                return serde_json::to_string(&serde_json::json!({
+                    "error": format!("failed to initialize engine: {}", e),
+                }))
+                .unwrap();
+            }
+        };
+
+        let snap = new_engine.snapshot();
+        info!(
+            diagnostics = snap.diagnostics.len(),
+            frontier = snap.frontier().len(),
+            "forge-mcp corpus loaded via init tool"
+        );
+        *engine = Some(new_engine);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "loaded",
+            "config": config_path.display().to_string(),
+        }))
+        .unwrap()
+    }
 }
 
 #[tool_handler]

@@ -281,3 +281,60 @@ fn acceptance_spec_11_empty_mode() {
         "propose in empty mode should be refused"
     );
 }
+
+#[test]
+fn acceptance_spec_12_init_loads_corpus() {
+    let cwd = empty_corpus_cwd();
+
+    let mut client = MCPClient::new_empty(&cwd);
+    client.initialize();
+
+    let src = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/corpus"
+    ));
+    copy_dir(&src, &cwd).unwrap();
+
+    let list_resp = client.send("tools/list", serde_json::json!({}));
+    let tools = list_resp["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"init"),
+        "tools/list must include init: {:?}",
+        names
+    );
+
+    let init_resp = client.call_tool("init", serde_json::json!({}));
+    let init_text = init_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let init_result: Value = serde_json::from_str(init_text).unwrap();
+    assert_eq!(init_result["status"], "loaded");
+
+    let search_resp = client.call_tool(
+        "search",
+        serde_json::json!({"query": "rust", "scope": "both", "limit": 5}),
+    );
+    let search_text = search_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let search_result: Value = serde_json::from_str(search_text).unwrap();
+    assert!(
+        search_result.get("hint").is_none(),
+        "loaded corpus should not show the empty-mode hint"
+    );
+    assert!(
+        !search_result["hits"].as_array().unwrap().is_empty(),
+        "fixtures corpus should return hits after init"
+    );
+
+    let init2_resp = client.call_tool("init", serde_json::json!({}));
+    let init2_text = init2_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let init2_result: Value = serde_json::from_str(init2_text).unwrap();
+    assert_eq!(init2_result["status"], "already loaded");
+}
