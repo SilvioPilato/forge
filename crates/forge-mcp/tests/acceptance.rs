@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use serde_json::Value;
@@ -31,6 +31,14 @@ fn copy_dir(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
+fn empty_corpus_cwd() -> PathBuf {
+    let dir = std::env::temp_dir().join("forge-mcp-empty-mode-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    dir
+}
+
 struct MCPClient {
     child: Child,
     stdin: std::process::ChildStdin,
@@ -43,6 +51,25 @@ impl MCPClient {
         let bin = env!("CARGO_BIN_EXE_forge-mcp");
         let mut child = Command::new(bin)
             .arg(config_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        MCPClient {
+            child,
+            stdin,
+            reader: BufReader::new(stdout),
+            next_id: 1,
+        }
+    }
+
+    fn new_empty(cwd: &Path) -> Self {
+        let bin = env!("CARGO_BIN_EXE_forge-mcp");
+        let mut child = Command::new(bin)
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -210,4 +237,47 @@ fn acceptance_spec_10_e2e() {
     let why_text = why_resp["result"]["content"][0]["text"].as_str().unwrap();
     let why_result: Value = serde_json::from_str(why_text).unwrap();
     assert!(why_result.get("chain").is_some(), "why should return chain");
+}
+
+#[test]
+fn acceptance_spec_11_empty_mode() {
+    let cwd = empty_corpus_cwd();
+    let mut client = MCPClient::new_empty(&cwd);
+
+    let init_resp = client.initialize();
+    assert!(
+        init_resp.get("result").is_some(),
+        "initialize failed in empty mode: {}",
+        init_resp
+    );
+
+    let search_resp = client.call_tool(
+        "search",
+        serde_json::json!({"query": "anything", "scope": "both", "limit": 10}),
+    );
+    let search_text = search_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let search_result: Value = serde_json::from_str(search_text).unwrap();
+    assert!(
+        search_result["hits"].as_array().unwrap().is_empty(),
+        "empty corpus should return no hits"
+    );
+    assert!(
+        search_result.get("hint").is_some(),
+        "empty-mode search should include a hint"
+    );
+
+    let propose_resp = client.call_tool(
+        "propose_decision",
+        serde_json::json!({"title": "x", "forces": []}),
+    );
+    let propose_text = propose_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let propose_result: Value = serde_json::from_str(propose_text).unwrap();
+    assert!(
+        propose_result.get("error").is_some(),
+        "propose in empty mode should be refused"
+    );
 }

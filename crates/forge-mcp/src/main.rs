@@ -16,14 +16,55 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 struct ForgeServer {
-    engine: Mutex<Engine>,
+    engine: Mutex<Option<Engine>>,
+    project_dir: PathBuf,
 }
 
 impl ForgeServer {
-    fn new(engine: Engine) -> Self {
+    fn empty(project_dir: PathBuf) -> Self {
         Self {
-            engine: Mutex::new(engine),
+            engine: Mutex::new(None),
+            project_dir,
         }
+    }
+
+    fn loaded(engine: Engine, project_dir: PathBuf) -> Self {
+        Self {
+            engine: Mutex::new(Some(engine)),
+            project_dir,
+        }
+    }
+
+    fn no_corpus_hits() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "hits": [],
+            "hint": "No forge.toml in this project. Call the `init` tool (after user assent) to scaffold a corpus.",
+        }))
+        .unwrap()
+    }
+
+    fn no_corpus_not_found() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "error": "not found",
+            "hint": "No forge.toml in this project. Call the `init` tool (after user assent) to scaffold a corpus.",
+        }))
+        .unwrap()
+    }
+
+    fn no_corpus_stale_report() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "stale": [],
+            "diagnostics_summary": {"count": 0, "kinds": []},
+            "hint": "No forge.toml in this project. Call the `init` tool (after user assent) to scaffold a corpus.",
+        }))
+        .unwrap()
+    }
+
+    fn no_corpus_write_refused() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "error": "no corpus; call `init` first (after user assent)",
+        }))
+        .unwrap()
     }
 }
 
@@ -92,6 +133,10 @@ impl ForgeServer {
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let engine = self.engine.lock().await;
+        let engine = match engine.as_ref() {
+            Some(e) => e,
+            None => return Self::no_corpus_hits(),
+        };
         let snap = engine.snapshot();
         let scope = match params.scope.as_deref() {
             Some("force") => Scope::Force,
@@ -142,6 +187,10 @@ impl ForgeServer {
     )]
     async fn get(&self, Parameters(params): Parameters<GetParams>) -> String {
         let engine = self.engine.lock().await;
+        let engine = match engine.as_ref() {
+            Some(e) => e,
+            None => return Self::no_corpus_not_found(),
+        };
         let snap = engine.snapshot();
         match snap.graph.get(&params.id) {
             Some(record) => {
@@ -184,6 +233,10 @@ impl ForgeServer {
     )]
     async fn why(&self, Parameters(params): Parameters<WhyParams>) -> String {
         let engine = self.engine.lock().await;
+        let engine = match engine.as_ref() {
+            Some(e) => e,
+            None => return Self::no_corpus_not_found(),
+        };
         let snap = engine.snapshot();
         match snap.why(&params.id) {
             Some(chain) => serde_json::to_string_pretty(&serde_json::json!({
@@ -209,6 +262,10 @@ impl ForgeServer {
     )]
     async fn stale_report(&self) -> String {
         let engine = self.engine.lock().await;
+        let engine = match engine.as_ref() {
+            Some(e) => e,
+            None => return Self::no_corpus_stale_report(),
+        };
         let snap = engine.snapshot();
         let report = snap.stale_report();
         serde_json::to_string_pretty(&serde_json::json!({
@@ -242,6 +299,10 @@ impl ForgeServer {
     )]
     async fn propose_decision(&self, Parameters(params): Parameters<ProposeParams>) -> String {
         let engine = self.engine.lock().await;
+        let engine = match engine.as_ref() {
+            Some(e) => e,
+            None => return Self::no_corpus_write_refused(),
+        };
         let input = ProposeInput {
             title: params.title,
             body: params.body.unwrap_or_default(),
@@ -288,6 +349,10 @@ impl ForgeServer {
                 }
             };
         let mut engine = self.engine.lock().await;
+        let engine = match engine.as_mut() {
+            Some(e) => e,
+            None => return Self::no_corpus_write_refused(),
+        };
         match engine.commit(proposed) {
             Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
             Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
@@ -299,6 +364,10 @@ impl ForgeServer {
     )]
     async fn set_status(&self, Parameters(params): Parameters<SetStatusParams>) -> String {
         let mut engine = self.engine.lock().await;
+        let engine = match engine.as_mut() {
+            Some(e) => e,
+            None => return Self::no_corpus_write_refused(),
+        };
         match engine.set_status(&params.id, &params.status) {
             Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
             Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
@@ -351,38 +420,34 @@ async fn main() -> anyhow::Result<()> {
     let explicit = cli.config.or(cli.positional_config);
     let env_value = std::env::var_os("FORGE_CONFIG").map(PathBuf::from);
     let cwd = std::env::current_dir()?;
-    let config_path = match discover::resolve_config(explicit, env_value, &cwd) {
-        Some(p) => p,
-        None => anyhow::bail!(
-            "No forge.toml found (searched upward from {}).\n\
-             Fix: pass --config <path>, set FORGE_CONFIG, or run `forge-mcp init` to scaffold a corpus.",
-            cwd.display()
-        ),
-    };
 
-    let cfg = Config::load(&config_path)
-        .with_context(|| format!("failed to load config at {}", config_path.display()))?;
-
-    init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
-
-    let embedder = match default_embedder(&cfg) {
-        Ok(e) => e,
-        Err(e) => {
-            anyhow::bail!("Failed to create embedder: {}", e.0);
+    let server = match discover::resolve_config(explicit, env_value, &cwd) {
+        Some(config_path) => {
+            let cfg = Config::load(&config_path)
+                .with_context(|| format!("failed to load config at {}", config_path.display()))?;
+            init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
+            let embedder = match default_embedder(&cfg) {
+                Ok(e) => e,
+                Err(e) => {
+                    anyhow::bail!("Failed to create embedder: {}", e.0);
+                }
+            };
+            let engine = Engine::new(cfg, embedder)
+                .map_err(|e| anyhow::anyhow!("Failed to initialize engine: {}", e))?;
+            let snap = engine.snapshot();
+            info!(
+                diagnostics = snap.diagnostics.len(),
+                frontier = snap.frontier().len(),
+                "forge-mcp ready"
+            );
+            ForgeServer::loaded(engine, cwd)
+        }
+        None => {
+            init_subscriber("info", "compact", None);
+            info!("forge-mcp starting in empty mode (no forge.toml found)");
+            ForgeServer::empty(cwd)
         }
     };
-
-    let engine = Engine::new(cfg, embedder)
-        .map_err(|e| anyhow::anyhow!("Failed to initialize engine: {}", e))?;
-
-    let snap = engine.snapshot();
-    info!(
-        diagnostics = snap.diagnostics.len(),
-        frontier = snap.frontier().len(),
-        "forge-mcp ready"
-    );
-
-    let server = ForgeServer::new(engine);
 
     let (stdin, stdout) = rmcp::transport::io::stdio();
     rmcp::service::serve_server(server, (stdin, stdout))
