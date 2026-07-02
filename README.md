@@ -108,7 +108,9 @@ working directory, pin the config explicitly:
 
 ### Empty mode
 
-With no `forge.toml` in the project (and none pinned via `--config` or `FORGE_CONFIG`), the server starts in **empty mode**: it answers the MCP handshake immediately and loads the corpus in the background. Tools return `{"status": "loading"}` until the corpus is ready, and a `notifications/message` logging notification announces readiness. The read tools return empty results with a hint pointing to `init`; the write tools refuse until a corpus is loaded. Call the `init` tool (after user assent) to scaffold a corpus in the project root and hot-load it without restarting the server.
+With no `forge.toml` in the project (and none pinned via `--config` or `FORGE_CONFIG`), the server starts in **empty mode**: no model is loaded, read tools return empty results with `no_corpus_*` hints pointing to `init`, and write tools refuse with hints to scaffold a corpus first. Call the `init` tool (after user assent) to scaffold a corpus in the project root and hot-load it without restarting the server.
+
+When a `forge.toml` **is** discovered, the server answers the MCP handshake immediately and loads the corpus in the background. While loading, tools return `{"status": "loading"}`. A `notifications/message` logging notification announces both readiness and loading failures.
 
 **Config resolution order:** `--config <path>` (or positional path) →
 `FORGE_CONFIG` env var → walk up from the working directory until a
