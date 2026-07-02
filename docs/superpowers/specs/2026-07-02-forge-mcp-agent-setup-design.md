@@ -33,6 +33,13 @@ Add `clap` (derive feature) to `forge-mcp`.
 | `forge-mcp --config <path>` | Serve with explicit config path |
 | `forge-mcp init [dir]` | Scaffold a new corpus in `dir` (default: cwd) |
 
+Edge cases decided:
+
+- Supplying both a positional path and `--config` is an error (clap
+  `conflicts_with`), not a silent precedence rule.
+- A config path literally named `init` is shadowed by the subcommand (clap's
+  default resolution). Accepted; use `--config init` in that pathological case.
+
 ## Config Resolution Ladder
 
 First hit wins:
@@ -56,7 +63,10 @@ First hit wins:
   - `[embedding]` with `model = "intfloat/multilingual-e5-small"`, plus a
     comment noting the `fake-bucket` test option and the ~120MB first-run
     model download.
-- Creates empty `decisions/` and `forces/` directories.
+- Creates empty `decisions/` and `forces/` directories. This is load-bearing,
+  not cosmetic: `Config::load` canonicalizes root paths and fails when the
+  directories are missing.
+- Creates `dir` itself (and intermediate directories) when it doesn't exist.
 - Refuses to overwrite an existing `forge.toml` (error, non-zero exit).
   Existing record directories are left untouched.
 
@@ -85,7 +95,9 @@ Unit tests in `forge-mcp`:
 - Resolution ladder: flag beats env; env beats walk; walk finds `forge.toml`
   in an ancestor; walk stops at a `.git` boundary; total miss produces the
   actionable error.
-- `init`: scaffolds config and directories; refuses when `forge.toml` exists.
+- `init`: scaffolds config and directories; refuses when `forge.toml` exists;
+  creates a missing target directory; an `init`-scaffolded corpus passes
+  `Config::load` (proves the created directories satisfy root canonicalization).
 
 Existing tests (including the spec §10 acceptance test) are untouched because
 the positional argument form survives.
