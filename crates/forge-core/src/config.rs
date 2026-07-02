@@ -7,6 +7,7 @@ pub struct Config {
     pub roots: Vec<PathBuf>,
     pub dedup: Dedup,
     pub embedding: Embedding,
+    pub log: LogConfig,
     pub cache_dir: PathBuf,
     pub write_dir: PathBuf,
 }
@@ -20,6 +21,23 @@ pub struct Dedup {
 #[derive(Debug, Clone)]
 pub struct Embedding {
     pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogConfig {
+    pub level: String,
+    pub format: String,
+    pub file: Option<PathBuf>,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            format: "pretty".to_string(),
+            file: None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +61,8 @@ struct ConfigToml {
     dedup: DedupToml,
     #[serde(default)]
     embedding: EmbeddingToml,
+    #[serde(default)]
+    log: LogToml,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +96,34 @@ impl Default for EmbeddingToml {
             model: default_model(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct LogToml {
+    #[serde(default = "default_log_level")]
+    level: String,
+    #[serde(default = "default_log_format")]
+    format: String,
+    file: Option<String>,
+}
+
+impl Default for LogToml {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            format: default_log_format(),
+            file: None,
+        }
+    }
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_format() -> String {
+    "pretty".to_string()
 }
 
 fn default_reuse() -> f32 {
@@ -124,6 +172,11 @@ impl Config {
             embedding: Embedding {
                 model: parsed.embedding.model,
             },
+            log: LogConfig {
+                level: parsed.log.level,
+                format: parsed.log.format,
+                file: parsed.log.file.map(|f| file_dir.join(f)),
+            },
             cache_dir,
             write_dir,
         })
@@ -164,5 +217,43 @@ mod tests {
         let result = Config::from_str("[dedup]\nreuse=0.9", std::path::Path::new("."));
         let err = result.unwrap_err();
         assert!(matches!(err, ConfigError::MissingRoots));
+    }
+
+    #[test]
+    fn loads_log_config_with_defaults() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("forge-test-decisions");
+        let _ = std::fs::create_dir_all(&root);
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        let toml_str = format!(
+            r#"
+roots = ["{}"]
+[log]
+level = "debug"
+format = "json"
+file = "forge.log"
+"#,
+            root_str
+        );
+        let cfg = Config::from_str(&toml_str, std::path::Path::new("/tmp/test")).unwrap();
+        assert_eq!(cfg.log.level, "debug");
+        assert_eq!(cfg.log.format, "json");
+        assert_eq!(
+            cfg.log.file,
+            Some(std::path::PathBuf::from("/tmp/test/forge.log"))
+        );
+    }
+
+    #[test]
+    fn log_config_has_sensible_defaults() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("forge-test-decisions-default");
+        let _ = std::fs::create_dir_all(&root);
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        let toml_str = format!(r#"roots = ["{}"]"#, root_str);
+        let cfg = Config::from_str(&toml_str, std::path::Path::new("/tmp/test")).unwrap();
+        assert_eq!(cfg.log.level, "info");
+        assert_eq!(cfg.log.format, "pretty");
+        assert_eq!(cfg.log.file, None);
     }
 }
