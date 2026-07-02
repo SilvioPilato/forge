@@ -4,15 +4,19 @@ use std::process::{Child, Command, Stdio};
 
 use serde_json::Value;
 
-fn temp_corpus_for_mcp() -> PathBuf {
+fn temp_corpus_named(name: &str) -> PathBuf {
     let src = PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/corpus"
     ));
-    let dst = std::env::temp_dir().join("forge-mcp-acceptance-test");
+    let dst = std::env::temp_dir().join(name);
     let _ = std::fs::remove_dir_all(&dst);
     copy_dir(&src, &dst).unwrap();
     dst
+}
+
+fn temp_corpus_for_mcp() -> PathBuf {
+    temp_corpus_named("forge-mcp-acceptance-test")
 }
 
 fn copy_dir(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
@@ -337,4 +341,53 @@ fn acceptance_spec_12_init_loads_corpus() {
         .unwrap();
     let init2_result: Value = serde_json::from_str(init2_text).unwrap();
     assert_eq!(init2_result["status"], "already loaded");
+}
+
+#[test]
+fn acceptance_spec_13_reindex_picks_up_manual_edits() {
+    let corpus = temp_corpus_named("forge-mcp-reindex-test");
+    let config_path = corpus.join("forge.toml").to_string_lossy().to_string();
+    let mut client = MCPClient::new(&config_path);
+    client.initialize();
+
+    let propose_resp = client.call_tool(
+        "propose_decision",
+        serde_json::json!({
+            "title": "Reindex target decision",
+            "body": "Will be edited on disk.",
+            "forces": [{"existing_id": "f-rust-stable"}]
+        }),
+    );
+    let text = propose_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let proposed: Value = serde_json::from_str(text).unwrap();
+    let commit_resp = client.call_tool("commit", serde_json::json!({ "proposed": proposed }));
+    let commit_text = commit_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let receipt: Value = serde_json::from_str(commit_text).unwrap();
+    let decision_id = receipt["decision_id"].as_str().unwrap();
+
+    // hand-edit the committed file's date, as issue #2's follow-up repro does
+    let file = corpus.join("decisions").join(format!("{decision_id}.md"));
+    let content = std::fs::read_to_string(&file).unwrap();
+    let edited: String = content
+        .lines()
+        .map(|l| {
+            if l.starts_with("date:") {
+                "date: 2026-06-10".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&file, edited).unwrap();
+
+    let reindex_resp = client.call_tool("reindex", serde_json::json!({}));
+    let reindex_text = reindex_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let reindex_result: Value = serde_json::from_str(reindex_text).unwrap();
+    assert_eq!(reindex_result["status"], "reindexed", "got: {reindex_result}");
+
+    let get_resp = client.call_tool("get", serde_json::json!({"id": decision_id}));
+    let get_text = get_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let record: Value = serde_json::from_str(get_text).unwrap();
+    assert_eq!(record["date"], "2026-06-10");
 }

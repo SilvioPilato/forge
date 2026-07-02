@@ -375,6 +375,30 @@ impl ForgeServer {
     }
 
     #[tool(
+        description = "Re-scan the corpus roots from disk and rebuild the index. Use after manually editing or adding record files so get/search reflect the on-disk state."
+    )]
+    async fn reindex(&self) -> String {
+        let mut engine = self.engine.lock().await;
+        let engine = match engine.as_mut() {
+            Some(e) => e,
+            None => return Self::no_corpus_write_refused(),
+        };
+        match engine.rebuild() {
+            Ok(()) => {
+                let snap = engine.snapshot();
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "reindexed",
+                    "decisions": snap.graph.decisions().len(),
+                    "forces": snap.graph.forces().len(),
+                    "diagnostics": snap.diagnostics.len(),
+                }))
+                .unwrap()
+            }
+            Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
+        }
+    }
+
+    #[tool(
         description = "Scaffold a forge corpus (forge.toml + decisions/ + forces/) in this project's root and load it. Call only after the user has assented. Refuses to overwrite an existing forge.toml."
     )]
     async fn init(&self) -> String {
