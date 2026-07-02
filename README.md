@@ -30,7 +30,7 @@ model = "fake-bucket"              # "fake-bucket" for tests, or "intfloat/multi
 
 ## MCP Tools
 
-Seven tools exposed over stdio:
+Eight tools exposed over stdio:
 
 **Read tools** (always available):
 - `search` — Semantic search over frontier decisions and forces
@@ -42,6 +42,9 @@ Seven tools exposed over stdio:
 - `propose_decision` — Preview a new decision (pure, no writes)
 - `commit` — Write a proposed decision to disk (call only after user assent)
 - `set_status` — Change force or decision status, returns propagation impact
+
+**Setup tool:**
+- `init` — Scaffold a forge corpus (forge.toml + decisions/ + forces/) in the project root and load it into the running server. Call only after the user has assented. Refuses to overwrite an existing forge.toml.
 
 ### Setup for agents
 
@@ -102,9 +105,11 @@ working directory, pin the config explicitly:
 }
 ```
 
-On a cold model cache the first launch can exceed opencode's 5s tool-fetch
-timeout (see First-Run Model Download below); warm the cache by running
-`forge-mcp` once in the project, or add `"timeout": 120000` to the entry.
+### Empty mode
+
+With no `forge.toml` in the project (and none pinned via `--config` or `FORGE_CONFIG`), the server starts in **empty mode**: it connects immediately — no embedder is constructed, so there is no model download and no cold-cache timeout. The read tools return empty results with a hint pointing to `init`; the write tools refuse until a corpus is loaded. Call the `init` tool (after user assent) to scaffold a corpus in the project root and hot-load it without restarting the server.
+
+In empty mode the server connects instantly (no embedder). When a corpus is loaded — at startup or via the `init` tool — a cold model cache can exceed opencode's 5s tool-fetch timeout; warm the cache by running `forge-mcp` once in the project, or add `"timeout": 120000` to the entry. (The `init` tool itself is a tool *call*, not a tool *fetch*, so it is not subject to the 5s limit — the first-run download happens there.)
 
 **Config resolution order:** `--config <path>` (or positional path) →
 `FORGE_CONFIG` env var → walk up from the working directory until a
