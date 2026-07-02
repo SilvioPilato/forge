@@ -63,3 +63,36 @@ pub fn default_embedder(cfg: &crate::config::Config) -> Result<Box<dyn Embedder>
         ))),
     }
 }
+
+/// Ensure the configured embedding model's files are present in the local
+/// cache, downloading them if missing. Fake test models need no files.
+pub fn prefetch_model(
+    cfg: &crate::config::Config,
+    _show_progress: bool,
+) -> Result<(), EmbedError> {
+    match cfg.embedding.model.as_str() {
+        "fake-bucket" | "fake-pinned" => Ok(()),
+        #[cfg(feature = "onnx")]
+        other => e5::fetch_model_files(&cfg.cache_dir, other, _show_progress).map(|_| ()),
+        #[cfg(not(feature = "onnx"))]
+        other => Err(EmbedError(format!(
+            "unknown model '{}' (onnx feature not enabled)",
+            other
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn prefetch_is_a_noop_for_fake_models() {
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/corpus"
+        ));
+        let cfg = crate::config::Config::load(&dir.join("forge.toml")).unwrap();
+        assert_eq!(cfg.embedding.model, "fake-bucket");
+        // must not touch the network or the cache dir
+        super::prefetch_model(&cfg, false).unwrap();
+    }
+}

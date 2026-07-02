@@ -1,4 +1,26 @@
 #[cfg(feature = "onnx")]
+pub(crate) fn fetch_model_files(
+    cache_dir: &std::path::Path,
+    model_id: &str,
+    show_progress: bool,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), super::EmbedError> {
+    let cache = hf_hub::Cache::new(cache_dir.join("models"));
+    let api = hf_hub::api::sync::ApiBuilder::from_cache(cache)
+        .with_progress(show_progress)
+        .build()
+        .map_err(|e| super::EmbedError(format!("hf-hub api: {e}")))?;
+    let repo = api.model(model_id.to_string());
+
+    let onnx_path = repo
+        .get("onnx/model.onnx")
+        .map_err(|e| super::EmbedError(format!("download model.onnx: {e}")))?;
+    let tokenizer_path = repo
+        .get("tokenizer.json")
+        .map_err(|e| super::EmbedError(format!("download tokenizer.json: {e}")))?;
+    Ok((onnx_path, tokenizer_path))
+}
+
+#[cfg(feature = "onnx")]
 pub struct E5Embedder {
     model_id: String,
     session: std::sync::Mutex<ort::session::Session>,
@@ -11,19 +33,7 @@ impl E5Embedder {
         cache_dir: &std::path::Path,
         model_id: &str,
     ) -> Result<E5Embedder, super::EmbedError> {
-        let cache = hf_hub::Cache::new(cache_dir.join("models"));
-        let api = hf_hub::api::sync::ApiBuilder::from_cache(cache)
-            .with_progress(false)
-            .build()
-            .map_err(|e| super::EmbedError(format!("hf-hub api: {e}")))?;
-        let repo = api.model(model_id.to_string());
-
-        let onnx_path = repo
-            .get("onnx/model.onnx")
-            .map_err(|e| super::EmbedError(format!("download model.onnx: {e}")))?;
-        let tokenizer_path = repo
-            .get("tokenizer.json")
-            .map_err(|e| super::EmbedError(format!("download tokenizer.json: {e}")))?;
+        let (onnx_path, tokenizer_path) = fetch_model_files(cache_dir, model_id, false)?;
 
         let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| super::EmbedError(format!("tokenizer load: {e}")))?;

@@ -157,13 +157,21 @@ impl Engine {
         })
     }
 
-    #[instrument(skip(self), fields(write_dir = %self.cfg.write_dir.display()))]
+    #[instrument(skip(self), fields(decisions_dir = %self.cfg.decisions_write_dir.display()))]
     pub fn commit(&mut self, proposed: Proposed) -> Result<Receipt, String> {
         let re_proposed = self
             .propose_decision(proposed.input.clone())
             .map_err(|e| format!("commit validation failed: {}", e.0))?;
         if !re_proposed.problems.is_empty() {
             return Err(format!("invalid: {}", re_proposed.problems.join("; ")));
+        }
+
+        let date = proposed.decision.date.clone();
+        if chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() {
+            return Err(format!(
+                "invalid decision date '{}' (expected YYYY-MM-DD)",
+                date
+            ));
         }
 
         let mut created_force_ids = Vec::new();
@@ -226,8 +234,8 @@ impl Engine {
             }
         }
 
-        let write_decisions_dir = self.cfg.write_dir.join("decisions");
-        let write_forces_dir = self.cfg.write_dir.join("forces");
+        let write_decisions_dir = self.cfg.decisions_write_dir.clone();
+        let write_forces_dir = self.cfg.forces_write_dir.clone();
         std::fs::create_dir_all(&write_decisions_dir)
             .map_err(|e| format!("create decisions dir: {}", e))?;
         std::fs::create_dir_all(&write_forces_dir)
@@ -262,6 +270,7 @@ impl Engine {
 
         let mut decision = re_proposed.decision.clone();
         decision.cites = decision_cites;
+        decision.date = date;
         let content = crate::record::serialize_decision(&decision);
         let path = write_decisions_dir.join(format!("{}.md", decision.id));
         std::fs::write(&path, &content).map_err(|e| format!("write decision: {}", e))?;
@@ -419,17 +428,13 @@ impl Engine {
 fn find_record_file(id: &str, cfg: &Config) -> Option<std::path::PathBuf> {
     let filename = format!("{}.md", id);
     for root in &cfg.roots {
-        let candidate = root.join(&filename);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    for entry in walkdir::WalkDir::new(&cfg.write_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() && entry.file_name().to_string_lossy() == filename {
-            return Some(entry.path().to_path_buf());
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() && entry.file_name().to_string_lossy() == filename {
+                return Some(entry.path().to_path_buf());
+            }
         }
     }
     None
@@ -688,12 +693,46 @@ mod tests {
         assert!(!receipt.decision_id.is_empty());
         let decision_path = engine
             .cfg
-            .write_dir
-            .join("decisions")
+            .decisions_write_dir
             .join(format!("{}.md", receipt.decision_id));
         assert!(decision_path.exists());
         let snap = engine.snapshot();
         assert!(snap.graph.get(&receipt.decision_id).is_some());
+    }
+
+    #[test]
+    fn commit_writes_into_declared_roots_not_nested() {
+        let (dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let p = engine
+            .propose_decision(ProposeInput {
+                title: "Root layout test".into(),
+                body: "Files must land in the declared roots.".into(),
+                forces: vec![ForceInput::New {
+                    title: "A brand new layout force".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        let receipt = engine.commit(p).unwrap();
+
+        let decision_file = dir
+            .join("decisions")
+            .join(format!("{}.md", receipt.decision_id));
+        let force_file = dir
+            .join("forces")
+            .join(format!("{}.md", receipt.created_force_ids[0]));
+        assert!(decision_file.exists(), "missing {}", decision_file.display());
+        assert!(force_file.exists(), "missing {}", force_file.display());
+        assert!(!dir.join("decisions").join("decisions").exists());
+        assert!(!dir.join("decisions").join("forces").exists());
     }
 
     #[test]
@@ -876,5 +915,62 @@ mod tests {
 
         assert!(!p.problems.is_empty());
         assert!(p.problems.iter().any(|msg| msg.contains("d-nonexistent")));
+    }
+
+    #[test]
+    fn commit_honors_edited_decision_date() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let mut p = engine
+            .propose_decision(ProposeInput {
+                title: "Backfilled decision".into(),
+                body: "Made in the past, recorded today.".into(),
+                forces: vec![ForceInput::New {
+                    title: "A historical force".into(),
+                    body: "...".into(),
+                    force_new: false,
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        assert_eq!(p.decision.date, today_iso());
+        p.decision.date = "2026-06-10".into();
+
+        let receipt = engine.commit(p).unwrap();
+        let snap = engine.snapshot();
+        match snap.graph.get(&receipt.decision_id) {
+            Some(crate::graph::Record::Decision(d)) => assert_eq!(d.date, "2026-06-10"),
+            other => panic!("expected decision, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn commit_rejects_malformed_decision_date() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let embedder = Box::new(BucketEmbedder::default());
+        let mut engine = Engine::new(cfg, embedder).unwrap();
+
+        let mut p = engine
+            .propose_decision(ProposeInput {
+                title: "Bad date decision".into(),
+                body: "body".into(),
+                forces: vec![ForceInput::Existing {
+                    id: "f-rust-stable".into(),
+                }],
+                supersedes: vec![],
+                relates: vec![],
+                tags: vec![],
+            })
+            .unwrap();
+        p.decision.date = "next tuesday".into();
+
+        let err = engine.commit(p).unwrap_err();
+        assert!(err.contains("invalid decision date"), "got: {err}");
     }
 }

@@ -14,25 +14,23 @@ use tokio::sync::Mutex;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+enum EngineState {
+    Empty,
+    Loading,
+    Ready(Engine),
+    Failed(String),
+}
 
 struct ForgeServer {
-    engine: Mutex<Option<Engine>>,
+    state: Arc<Mutex<EngineState>>,
     project_dir: PathBuf,
 }
 
 impl ForgeServer {
-    fn empty(project_dir: PathBuf) -> Self {
-        Self {
-            engine: Mutex::new(None),
-            project_dir,
-        }
-    }
-
-    fn loaded(engine: Engine, project_dir: PathBuf) -> Self {
-        Self {
-            engine: Mutex::new(Some(engine)),
-            project_dir,
-        }
+    fn new(state: Arc<Mutex<EngineState>>, project_dir: PathBuf) -> Self {
+        Self { state, project_dir }
     }
 
     fn no_corpus_hits() -> String {
@@ -63,6 +61,22 @@ impl ForgeServer {
     fn no_corpus_write_refused() -> String {
         serde_json::to_string(&serde_json::json!({
             "error": "no corpus; call `init` first (after user assent)",
+        }))
+        .unwrap()
+    }
+
+    fn loading_response() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "status": "loading",
+            "hint": "The corpus is still loading (the embedding model may be downloading). Retry in a few seconds.",
+        }))
+        .unwrap()
+    }
+
+    fn failed_response(err: &str) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "error": format!("corpus failed to load: {err}"),
+            "hint": "Fix the problem and restart the forge-mcp server.",
         }))
         .unwrap()
     }
@@ -132,10 +146,12 @@ impl ForgeServer {
         description = "Search for decisions and forces on the frontier by semantic similarity. Scope can be 'force', 'decision', or 'both' (default)."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
-        let engine = self.engine.lock().await;
-        let engine = match engine.as_ref() {
-            Some(e) => e,
-            None => return Self::no_corpus_hits(),
+        let state = self.state.lock().await;
+        let engine = match &*state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_hits(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(err),
         };
         let snap = engine.snapshot();
         let scope = match params.scope.as_deref() {
@@ -186,10 +202,12 @@ impl ForgeServer {
         description = "Get a decision or force record by ID, including its neighborhood (edges both ways) and verdict."
     )]
     async fn get(&self, Parameters(params): Parameters<GetParams>) -> String {
-        let engine = self.engine.lock().await;
-        let engine = match engine.as_ref() {
-            Some(e) => e,
-            None => return Self::no_corpus_not_found(),
+        let state = self.state.lock().await;
+        let engine = match &*state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_not_found(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(err),
         };
         let snap = engine.snapshot();
         match snap.graph.get(&params.id) {
@@ -232,10 +250,12 @@ impl ForgeServer {
         description = "Explain why a decision's premises are stale. Shows the dependency chain from the decision back to each fallen force."
     )]
     async fn why(&self, Parameters(params): Parameters<WhyParams>) -> String {
-        let engine = self.engine.lock().await;
-        let engine = match engine.as_ref() {
-            Some(e) => e,
-            None => return Self::no_corpus_not_found(),
+        let state = self.state.lock().await;
+        let engine = match &*state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_not_found(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(err),
         };
         let snap = engine.snapshot();
         match snap.why(&params.id) {
@@ -261,10 +281,12 @@ impl ForgeServer {
         description = "Report all stale frontier decisions, ordered by severity (retired before changed) then by distance."
     )]
     async fn stale_report(&self) -> String {
-        let engine = self.engine.lock().await;
-        let engine = match engine.as_ref() {
-            Some(e) => e,
-            None => return Self::no_corpus_stale_report(),
+        let state = self.state.lock().await;
+        let engine = match &*state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_stale_report(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(err),
         };
         let snap = engine.snapshot();
         let report = snap.stale_report();
@@ -298,10 +320,12 @@ impl ForgeServer {
         description = "Propose a new decision with its supporting forces. This is PURE — it does not write any files. Use this freely to preview what would be created. Forces can be new (with title/body) or existing (by id). Returns the composed records, any validation problems, and near-duplicate force matches."
     )]
     async fn propose_decision(&self, Parameters(params): Parameters<ProposeParams>) -> String {
-        let engine = self.engine.lock().await;
-        let engine = match engine.as_ref() {
-            Some(e) => e,
-            None => return Self::no_corpus_write_refused(),
+        let state = self.state.lock().await;
+        let engine = match &*state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_write_refused(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(err),
         };
         let input = ProposeInput {
             title: params.title,
@@ -335,7 +359,7 @@ impl ForgeServer {
     }
 
     #[tool(
-        description = "Commit a proposed decision to disk. Call only after the user has assented in conversation. Writes force and decision files, then synchronously rebuilds the index."
+        description = "Commit a proposed decision to disk. Call only after the user has assented in conversation. Writes force and decision files, then synchronously rebuilds the index. To backfill a historical decision, edit `decision.date` (YYYY-MM-DD) on the proposed object before committing — it is the only honored edit; anything else requires a fresh propose_decision."
     )]
     async fn commit(&self, Parameters(params): Parameters<CommitParams>) -> String {
         let proposed: forge_core::guardian::Proposed =
@@ -348,10 +372,12 @@ impl ForgeServer {
                     .unwrap()
                 }
             };
-        let mut engine = self.engine.lock().await;
-        let engine = match engine.as_mut() {
-            Some(e) => e,
-            None => return Self::no_corpus_write_refused(),
+        let mut state = self.state.lock().await;
+        let engine = match &mut *state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_write_refused(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(&err.clone()),
         };
         match engine.commit(proposed) {
             Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
@@ -363,10 +389,12 @@ impl ForgeServer {
         description = "Set the status of a force or decision. Forces: changed or retired (forward-only). Decisions: deprecated. Returns which decisions became newly stale due to this change — this is the feedback to tell the user 'this wobbles N decisions.'"
     )]
     async fn set_status(&self, Parameters(params): Parameters<SetStatusParams>) -> String {
-        let mut engine = self.engine.lock().await;
-        let engine = match engine.as_mut() {
-            Some(e) => e,
-            None => return Self::no_corpus_write_refused(),
+        let mut state = self.state.lock().await;
+        let engine = match &mut *state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_write_refused(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(&err.clone()),
         };
         match engine.set_status(&params.id, &params.status) {
             Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
@@ -375,15 +403,45 @@ impl ForgeServer {
     }
 
     #[tool(
+        description = "Re-scan the corpus roots from disk and rebuild the index. Use after manually editing or adding record files so get/search reflect the on-disk state."
+    )]
+    async fn reindex(&self) -> String {
+        let mut state = self.state.lock().await;
+        let engine = match &mut *state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_write_refused(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(&err.clone()),
+        };
+        match engine.rebuild() {
+            Ok(()) => {
+                let snap = engine.snapshot();
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "reindexed",
+                    "decisions": snap.graph.decisions().len(),
+                    "forces": snap.graph.forces().len(),
+                    "diagnostics": snap.diagnostics.len(),
+                }))
+                .unwrap()
+            }
+            Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
+        }
+    }
+
+    #[tool(
         description = "Scaffold a forge corpus (forge.toml + decisions/ + forces/) in this project's root and load it. Call only after the user has assented. Refuses to overwrite an existing forge.toml."
     )]
     async fn init(&self) -> String {
-        let mut engine = self.engine.lock().await;
-        if engine.is_some() {
-            return serde_json::to_string(&serde_json::json!({
-                "status": "already loaded",
-            }))
-            .unwrap();
+        let mut state = self.state.lock().await;
+        match &*state {
+            EngineState::Ready(_) => {
+                return serde_json::to_string(&serde_json::json!({
+                    "status": "already loaded",
+                }))
+                .unwrap()
+            }
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Empty | EngineState::Failed(_) => {}
         }
 
         let config_path = match scaffold::ensure_corpus(&self.project_dir) {
@@ -432,7 +490,7 @@ impl ForgeServer {
             frontier = snap.frontier().len(),
             "forge-mcp corpus loaded via init tool"
         );
-        *engine = Some(new_engine);
+        *state = EngineState::Ready(new_engine);
         serde_json::to_string_pretty(&serde_json::json!({
             "status": "loaded",
             "config": config_path.display().to_string(),
@@ -442,7 +500,16 @@ impl ForgeServer {
 }
 
 #[tool_handler]
-impl rmcp::ServerHandler for ForgeServer {}
+impl rmcp::ServerHandler for ForgeServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        #[allow(deprecated)]
+        let capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .enable_logging()
+            .build();
+        rmcp::model::ServerInfo::new(capabilities)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "forge-mcp", version, about = "Forge MCP server over stdio")]
@@ -479,6 +546,21 @@ async fn main() -> anyhow::Result<()> {
         };
         let config_path = scaffold::init(&target).map_err(|e| anyhow::anyhow!(e))?;
         println!("Scaffolded forge corpus: {}", config_path.display());
+
+        let cfg = Config::load(&config_path).with_context(|| {
+            format!("failed to load scaffolded config at {}", config_path.display())
+        })?;
+        println!(
+            "Fetching embedding model '{}' (skipped if already cached)...",
+            cfg.embedding.model
+        );
+        match forge_core::embed::prefetch_model(&cfg, true) {
+            Ok(()) => println!("Embedding model ready."),
+            Err(e) => eprintln!(
+                "warning: model prefetch failed: {e}\n\
+                 The model will be downloaded when the server first starts."
+            ),
+        }
         return Ok(());
     }
 
@@ -487,39 +569,89 @@ async fn main() -> anyhow::Result<()> {
     let env_value = std::env::var_os("FORGE_CONFIG").map(PathBuf::from);
     let cwd = std::env::current_dir()?;
 
-    let server = match discover::resolve_config(explicit, env_value, &cwd) {
+    let (server, pending) = match discover::resolve_config(explicit, env_value, &cwd) {
         Some(config_path) => {
             let cfg = Config::load(&config_path)
                 .with_context(|| format!("failed to load config at {}", config_path.display()))?;
             init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
-            let embedder = match default_embedder(&cfg) {
-                Ok(e) => e,
-                Err(e) => {
-                    anyhow::bail!("Failed to create embedder: {}", e.0);
-                }
-            };
-            let engine = Engine::new(cfg, embedder)
-                .map_err(|e| anyhow::anyhow!("Failed to initialize engine: {}", e))?;
-            let snap = engine.snapshot();
-            info!(
-                diagnostics = snap.diagnostics.len(),
-                frontier = snap.frontier().len(),
-                "forge-mcp ready"
-            );
-            ForgeServer::loaded(engine, cwd)
+            info!("forge-mcp starting; corpus will load in the background");
+            let state = Arc::new(Mutex::new(EngineState::Loading));
+            (
+                ForgeServer::new(state.clone(), cwd),
+                Some((cfg, state)),
+            )
         }
         None => {
             init_subscriber("info", "compact", None);
             info!("forge-mcp starting in empty mode (no forge.toml found)");
-            ForgeServer::empty(cwd)
+            (
+                ForgeServer::new(Arc::new(Mutex::new(EngineState::Empty)), cwd),
+                None,
+            )
         }
     };
 
     let (stdin, stdout) = rmcp::transport::io::stdio();
-    rmcp::service::serve_server(server, (stdin, stdout))
-        .await?
-        .waiting()
-        .await?;
+    let running = rmcp::service::serve_server(server, (stdin, stdout)).await?;
 
+    if let Some((cfg, state)) = pending {
+        let peer = running.peer().clone();
+        tokio::spawn(async move {
+            if let Some(ms) = std::env::var("FORGE_TEST_LOAD_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+
+            let result = tokio::task::spawn_blocking(move || {
+                let embedder = default_embedder(&cfg).map_err(|e| e.0)?;
+                Engine::new(cfg, embedder)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("engine loader panicked: {e}")));
+
+            let mut st = state.lock().await;
+            match result {
+                Ok(engine) => {
+                    let snap = engine.snapshot();
+                    info!(
+                        diagnostics = snap.diagnostics.len(),
+                        frontier = snap.frontier().len(),
+                        "forge-mcp corpus ready"
+                    );
+                    *st = EngineState::Ready(engine);
+
+                    #[allow(deprecated)]
+                    let _ = peer
+                        .notify_logging_message(
+                            rmcp::model::LoggingMessageNotificationParam::new(
+                                rmcp::model::LoggingLevel::Info,
+                                serde_json::json!({"event": "corpus_ready"}),
+                            )
+                            .with_logger("forge"),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "forge-mcp corpus failed to load");
+                    *st = EngineState::Failed(e.clone());
+
+                    #[allow(deprecated)]
+                    let _ = peer
+                        .notify_logging_message(
+                            rmcp::model::LoggingMessageNotificationParam::new(
+                                rmcp::model::LoggingLevel::Error,
+                                serde_json::json!({"event": "corpus_load_failed", "error": e}),
+                            )
+                            .with_logger("forge"),
+                        )
+                        .await;
+                }
+            }
+        });
+    }
+
+    running.waiting().await?;
     Ok(())
 }

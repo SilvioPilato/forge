@@ -9,7 +9,8 @@ pub struct Config {
     pub embedding: Embedding,
     pub log: LogConfig,
     pub cache_dir: PathBuf,
-    pub write_dir: PathBuf,
+    pub decisions_write_dir: PathBuf,
+    pub forces_write_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -159,7 +160,10 @@ impl Config {
         let roots: Result<Vec<PathBuf>, _> = roots.into_iter().map(|r| r.canonicalize()).collect();
         let roots = roots.map_err(ConfigError::Io)?;
 
-        let write_dir = roots.first().cloned().unwrap();
+        let first_root = roots.first().cloned().unwrap();
+        let decisions_write_dir =
+            root_named(&roots, "decisions").unwrap_or_else(|| first_root.clone());
+        let forces_write_dir = root_named(&roots, "forces").unwrap_or(first_root);
 
         let cache_dir = default_cache_dir();
 
@@ -178,7 +182,8 @@ impl Config {
                 file: parsed.log.file.map(|f| file_dir.join(f)),
             },
             cache_dir,
-            write_dir,
+            decisions_write_dir,
+            forces_write_dir,
         })
     }
 }
@@ -188,6 +193,13 @@ fn default_cache_dir() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".cache").join("forge")
+}
+
+fn root_named(roots: &[std::path::PathBuf], name: &str) -> Option<std::path::PathBuf> {
+    roots
+        .iter()
+        .find(|r| r.file_name().is_some_and(|f| f == name))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -209,7 +221,6 @@ mod tests {
         assert!((cfg.dedup.reuse - 0.90).abs() < 1e-4);
         assert!((cfg.dedup.warn - 0.75).abs() < 1e-4);
         assert_eq!(cfg.embedding.model, "fake-bucket");
-        assert_eq!(cfg.write_dir, dir.join("decisions").canonicalize().unwrap());
     }
 
     #[test]
@@ -255,5 +266,33 @@ file = "forge.log"
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, "pretty");
         assert_eq!(cfg.log.file, None);
+    }
+
+    #[test]
+    fn write_dirs_route_to_matching_roots() {
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/corpus"
+        ));
+        let cfg = Config::load(&dir.join("forge.toml")).unwrap();
+        assert_eq!(
+            cfg.decisions_write_dir,
+            dir.join("decisions").canonicalize().unwrap()
+        );
+        assert_eq!(
+            cfg.forces_write_dir,
+            dir.join("forces").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn write_dirs_fall_back_to_first_root() {
+        let tmp = std::env::temp_dir().join("forge-test-single-root");
+        let root = tmp.join("records");
+        let _ = std::fs::create_dir_all(&root);
+        let cfg = Config::from_str(r#"roots = ["records"]"#, &tmp).unwrap();
+        let expected = root.canonicalize().unwrap();
+        assert_eq!(cfg.decisions_write_dir, expected);
+        assert_eq!(cfg.forces_write_dir, expected);
     }
 }
