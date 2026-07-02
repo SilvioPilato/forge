@@ -9,6 +9,7 @@ use rmcp::{tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -344,13 +345,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // conflicts_with guarantees at most one of these is Some
     let explicit = cli.config.or(cli.positional_config);
     let env_value = std::env::var_os("FORGE_CONFIG").map(PathBuf::from);
     let cwd = std::env::current_dir()?;
     let config_path = discover::resolve_config(explicit, env_value, &cwd)
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let cfg = Config::load(&config_path)?;
+    let cfg = Config::load(&config_path)
+        .with_context(|| format!("failed to load config at {}", config_path.display()))?;
 
     let embedder = match default_embedder(&cfg) {
         Ok(e) => e,
