@@ -503,6 +503,21 @@ async fn main() -> anyhow::Result<()> {
         };
         let config_path = scaffold::init(&target).map_err(|e| anyhow::anyhow!(e))?;
         println!("Scaffolded forge corpus: {}", config_path.display());
+
+        let cfg = Config::load(&config_path).with_context(|| {
+            format!("failed to load scaffolded config at {}", config_path.display())
+        })?;
+        println!(
+            "Fetching embedding model '{}' (skipped if already cached)...",
+            cfg.embedding.model
+        );
+        match forge_core::embed::prefetch_model(&cfg, true) {
+            Ok(()) => println!("Embedding model ready."),
+            Err(e) => eprintln!(
+                "warning: model prefetch failed: {e}\n\
+                 The model will be downloaded when the server first starts."
+            ),
+        }
         return Ok(());
     }
 
