@@ -86,6 +86,26 @@ working directory, pin the config explicitly:
 }
 ```
 
+**opencode** uses its own config shape — `opencode.json` at the project root
+(or `~/.config/opencode/opencode.json` globally), with `command` as an array:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "forge": {
+      "type": "local",
+      "command": ["forge-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+On a cold model cache the first launch can exceed opencode's 5s tool-fetch
+timeout (see First-Run Model Download below); warm the cache by running
+`forge-mcp` once in the project, or add `"timeout": 120000` to the entry.
+
 **Config resolution order:** `--config <path>` (or positional path) →
 `FORGE_CONFIG` env var → walk up from the working directory until a
 `forge.toml` is found, stopping at the repository boundary (`.git`).
