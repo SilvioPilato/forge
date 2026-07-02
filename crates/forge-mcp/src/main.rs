@@ -3,7 +3,9 @@ mod scaffold;
 use forge_core::config::Config;
 use forge_core::embed::default_embedder;
 use forge_core::guardian::{Engine, ForceInput, ProposeInput};
+use forge_core::logging::init_subscriber;
 use forge_core::recall::{search, Scope};
+use tracing::info;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_handler, tool_router};
 use schemars::JsonSchema;
@@ -355,6 +357,8 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(&config_path)
         .with_context(|| format!("failed to load config at {}", config_path.display()))?;
 
+    init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
+
     let embedder = match default_embedder(&cfg) {
         Ok(e) => e,
         Err(e) => {
@@ -366,10 +370,10 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to initialize engine: {}", e))?;
 
     let snap = engine.snapshot();
-    eprintln!(
-        "Loaded {} diagnostics, {} frontier decisions",
-        snap.diagnostics.len(),
-        snap.frontier().len()
+    info!(
+        diagnostics = snap.diagnostics.len(),
+        frontier = snap.frontier().len(),
+        "forge-mcp ready"
     );
 
     let server = ForgeServer::new(engine);
