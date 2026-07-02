@@ -9,6 +9,8 @@ use rmcp::{tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 struct ForgeServer {
     engine: Mutex<Engine>,
@@ -304,15 +306,51 @@ impl ForgeServer {
 #[tool_handler]
 impl rmcp::ServerHandler for ForgeServer {}
 
+#[derive(Parser)]
+#[command(name = "forge-mcp", version, about = "Forge MCP server over stdio")]
+struct Cli {
+    /// Path to forge.toml (same as --config; kept for backward compatibility)
+    #[arg(value_name = "CONFIG", conflicts_with = "config")]
+    positional_config: Option<PathBuf>,
+
+    /// Path to forge.toml
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Scaffold a new forge corpus (forge.toml + decisions/ + forces/)
+    Init {
+        /// Target directory (default: current directory)
+        dir: Option<PathBuf>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        anyhow::bail!("Usage: forge-mcp <path/to/forge.toml>");
+    let cli = Cli::parse();
+
+    if let Some(Cmd::Init { dir }) = cli.command {
+        let target = match dir {
+            Some(d) => d,
+            None => std::env::current_dir()?,
+        };
+        let config_path = scaffold::init(&target).map_err(|e| anyhow::anyhow!(e))?;
+        println!("Scaffolded forge corpus: {}", config_path.display());
+        return Ok(());
     }
 
-    let config_path = &args[1];
-    let cfg = Config::load(std::path::Path::new(config_path))?;
+    let explicit = cli.config.or(cli.positional_config);
+    let env_value = std::env::var_os("FORGE_CONFIG").map(PathBuf::from);
+    let cwd = std::env::current_dir()?;
+    let config_path = discover::resolve_config(explicit, env_value, &cwd)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let cfg = Config::load(&config_path)?;
 
     let embedder = match default_embedder(&cfg) {
         Ok(e) => e,
