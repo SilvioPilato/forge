@@ -500,7 +500,16 @@ impl ForgeServer {
 }
 
 #[tool_handler]
-impl rmcp::ServerHandler for ForgeServer {}
+impl rmcp::ServerHandler for ForgeServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        #[allow(deprecated)]
+        let capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .enable_logging()
+            .build();
+        rmcp::model::ServerInfo::new(capabilities)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "forge-mcp", version, about = "Forge MCP server over stdio")]
@@ -560,39 +569,89 @@ async fn main() -> anyhow::Result<()> {
     let env_value = std::env::var_os("FORGE_CONFIG").map(PathBuf::from);
     let cwd = std::env::current_dir()?;
 
-    let server = match discover::resolve_config(explicit, env_value, &cwd) {
+    let (server, pending) = match discover::resolve_config(explicit, env_value, &cwd) {
         Some(config_path) => {
             let cfg = Config::load(&config_path)
                 .with_context(|| format!("failed to load config at {}", config_path.display()))?;
             init_subscriber(&cfg.log.level, &cfg.log.format, cfg.log.file.as_ref());
-            let embedder = match default_embedder(&cfg) {
-                Ok(e) => e,
-                Err(e) => {
-                    anyhow::bail!("Failed to create embedder: {}", e.0);
-                }
-            };
-            let engine = Engine::new(cfg, embedder)
-                .map_err(|e| anyhow::anyhow!("Failed to initialize engine: {}", e))?;
-            let snap = engine.snapshot();
-            info!(
-                diagnostics = snap.diagnostics.len(),
-                frontier = snap.frontier().len(),
-                "forge-mcp ready"
-            );
-            ForgeServer::new(Arc::new(Mutex::new(EngineState::Ready(engine))), cwd)
+            info!("forge-mcp starting; corpus will load in the background");
+            let state = Arc::new(Mutex::new(EngineState::Loading));
+            (
+                ForgeServer::new(state.clone(), cwd),
+                Some((cfg, state)),
+            )
         }
         None => {
             init_subscriber("info", "compact", None);
             info!("forge-mcp starting in empty mode (no forge.toml found)");
-            ForgeServer::new(Arc::new(Mutex::new(EngineState::Empty)), cwd)
+            (
+                ForgeServer::new(Arc::new(Mutex::new(EngineState::Empty)), cwd),
+                None,
+            )
         }
     };
 
     let (stdin, stdout) = rmcp::transport::io::stdio();
-    rmcp::service::serve_server(server, (stdin, stdout))
-        .await?
-        .waiting()
-        .await?;
+    let running = rmcp::service::serve_server(server, (stdin, stdout)).await?;
 
+    if let Some((cfg, state)) = pending {
+        let peer = running.peer().clone();
+        tokio::spawn(async move {
+            if let Some(ms) = std::env::var("FORGE_TEST_LOAD_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+
+            let result = tokio::task::spawn_blocking(move || {
+                let embedder = default_embedder(&cfg).map_err(|e| e.0)?;
+                Engine::new(cfg, embedder)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("engine loader panicked: {e}")));
+
+            let mut st = state.lock().await;
+            match result {
+                Ok(engine) => {
+                    let snap = engine.snapshot();
+                    info!(
+                        diagnostics = snap.diagnostics.len(),
+                        frontier = snap.frontier().len(),
+                        "forge-mcp corpus ready"
+                    );
+                    *st = EngineState::Ready(engine);
+
+                    #[allow(deprecated)]
+                    let _ = peer
+                        .notify_logging_message(
+                            rmcp::model::LoggingMessageNotificationParam::new(
+                                rmcp::model::LoggingLevel::Info,
+                                serde_json::json!({"event": "corpus_ready"}),
+                            )
+                            .with_logger("forge"),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "forge-mcp corpus failed to load");
+                    *st = EngineState::Failed(e.clone());
+
+                    #[allow(deprecated)]
+                    let _ = peer
+                        .notify_logging_message(
+                            rmcp::model::LoggingMessageNotificationParam::new(
+                                rmcp::model::LoggingLevel::Error,
+                                serde_json::json!({"event": "corpus_load_failed", "error": e}),
+                            )
+                            .with_logger("forge"),
+                        )
+                        .await;
+                }
+            }
+        });
+    }
+
+    running.waiting().await?;
     Ok(())
 }
