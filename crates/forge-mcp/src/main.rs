@@ -69,7 +69,7 @@ enum ForceSpec {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CommitParams {
-    proposed: serde_json::Value,
+    proposed: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -270,16 +270,16 @@ impl ForgeServer {
         description = "Commit a proposed decision to disk. Call only after the user has assented in conversation. Writes force and decision files, then synchronously rebuilds the index."
     )]
     async fn commit(&self, Parameters(params): Parameters<CommitParams>) -> String {
-        let proposed: forge_core::guardian::Proposed = match serde_json::from_value(params.proposed)
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return serde_json::to_string(
-                    &serde_json::json!({"error": format!("invalid proposed: {}", e)}),
-                )
-                .unwrap()
-            }
-        };
+        let proposed: forge_core::guardian::Proposed =
+            match serde_json::from_value(serde_json::Value::Object(params.proposed)) {
+                Ok(p) => p,
+                Err(e) => {
+                    return serde_json::to_string(
+                        &serde_json::json!({"error": format!("invalid proposed: {}", e)}),
+                    )
+                    .unwrap()
+                }
+            };
         let mut engine = self.engine.lock().await;
         match engine.commit(proposed) {
             Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
