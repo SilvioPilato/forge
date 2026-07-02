@@ -1,5 +1,4 @@
 mod discover;
-
 use forge_core::config::Config;
 use forge_core::embed::default_embedder;
 use forge_core::guardian::{Engine, ForceInput, ProposeInput};
