@@ -1,6 +1,6 @@
 use forge_core::config::Config;
 use forge_core::embed::default_embedder;
-use forge_core::guardian::Engine;
+use forge_core::guardian::{Engine, ForceInput, ProposeInput};
 use forge_core::recall::{search, Scope};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_handler, tool_router};
@@ -42,6 +42,40 @@ struct GetParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WhyParams {
     id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProposeParams {
+    title: String,
+    body: Option<String>,
+    forces: Vec<ForceSpec>,
+    supersedes: Option<Vec<String>>,
+    relates: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum ForceSpec {
+    New {
+        title: String,
+        body: Option<String>,
+        force_new: Option<bool>,
+    },
+    Existing {
+        existing_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CommitParams {
+    proposed: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SetStatusParams {
+    id: String,
+    status: String,
 }
 
 #[tool_router]
@@ -194,6 +228,74 @@ impl ForgeServer {
             }
         }))
         .unwrap()
+    }
+
+    #[tool(
+        description = "Propose a new decision with its supporting forces. This is PURE — it does not write any files. Use this freely to preview what would be created. Forces can be new (with title/body) or existing (by id). Returns the composed records, any validation problems, and near-duplicate force matches."
+    )]
+    async fn propose_decision(&self, Parameters(params): Parameters<ProposeParams>) -> String {
+        let engine = self.engine.lock().await;
+        let input = ProposeInput {
+            title: params.title,
+            body: params.body.unwrap_or_default(),
+            forces: params
+                .forces
+                .into_iter()
+                .map(|f| match f {
+                    ForceSpec::New {
+                        title,
+                        body,
+                        force_new,
+                    } => ForceInput::New {
+                        title,
+                        body: body.unwrap_or_default(),
+                        force_new: force_new.unwrap_or(false),
+                    },
+                    ForceSpec::Existing { existing_id } => ForceInput::Existing { id: existing_id },
+                })
+                .collect(),
+            supersedes: params.supersedes.unwrap_or_default(),
+            relates: params.relates.unwrap_or_default(),
+            tags: params.tags.unwrap_or_default(),
+        };
+        match engine.propose_decision(input) {
+            Ok(proposed) => serde_json::to_string_pretty(&proposed).unwrap(),
+            Err(e) => {
+                serde_json::to_string(&serde_json::json!({"error": format!("{}", e.0)})).unwrap()
+            }
+        }
+    }
+
+    #[tool(
+        description = "Commit a proposed decision to disk. Call only after the user has assented in conversation. Writes force and decision files, then synchronously rebuilds the index."
+    )]
+    async fn commit(&self, Parameters(params): Parameters<CommitParams>) -> String {
+        let proposed: forge_core::guardian::Proposed = match serde_json::from_value(params.proposed)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return serde_json::to_string(
+                    &serde_json::json!({"error": format!("invalid proposed: {}", e)}),
+                )
+                .unwrap()
+            }
+        };
+        let mut engine = self.engine.lock().await;
+        match engine.commit(proposed) {
+            Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
+            Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
+        }
+    }
+
+    #[tool(
+        description = "Set the status of a force or decision. Forces: changed or retired (forward-only). Decisions: deprecated. Returns which decisions became newly stale due to this change — this is the feedback to tell the user 'this wobbles N decisions.'"
+    )]
+    async fn set_status(&self, Parameters(params): Parameters<SetStatusParams>) -> String {
+        let mut engine = self.engine.lock().await;
+        match engine.set_status(&params.id, &params.status) {
+            Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
+            Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
+        }
     }
 }
 

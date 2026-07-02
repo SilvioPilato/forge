@@ -2,7 +2,7 @@ use crate::embed::{cosine, EmbedError, Embedder};
 use crate::graph::Record;
 use crate::record::ForceStatus;
 use crate::snapshot::Snapshot;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub enum Scope {
@@ -11,7 +11,7 @@ pub enum Scope {
     Both,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hit {
     pub id: String,
     pub title: String,

@@ -426,7 +426,7 @@ fn find_record_file(id: &str, cfg: &Config) -> Option<std::path::PathBuf> {
     None
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Proposed {
     pub decision: Decision,
     pub new_forces: Vec<Force>,
@@ -435,6 +435,7 @@ pub struct Proposed {
     pub input: ProposeInput,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Receipt {
     pub decision_id: String,
     pub created_force_ids: Vec<String>,
@@ -442,12 +443,14 @@ pub struct Receipt {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReusedEntry {
     pub proposed_id: String,
     pub existing_id: String,
     pub score: f32,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StatusReceipt {
     pub id: String,
     pub new_status: String,

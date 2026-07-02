@@ -10,7 +10,7 @@ pub enum Parsed {
     Error(ParseError),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Decision {
     pub id: String,
     pub title: String,
@@ -25,7 +25,7 @@ pub struct Decision {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Force {
     pub id: String,
     pub title: String,
@@ -60,7 +60,7 @@ pub enum DecisionStatus {
     Deprecated,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusEntry {
     pub status: ForceStatus,
     pub since: String,
