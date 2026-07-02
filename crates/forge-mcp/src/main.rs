@@ -351,8 +351,14 @@ async fn main() -> anyhow::Result<()> {
     let explicit = cli.config.or(cli.positional_config);
     let env_value = std::env::var_os("FORGE_CONFIG").map(PathBuf::from);
     let cwd = std::env::current_dir()?;
-    let config_path = discover::resolve_config(explicit, env_value, &cwd)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let config_path = match discover::resolve_config(explicit, env_value, &cwd) {
+        Some(p) => p,
+        None => anyhow::bail!(
+            "No forge.toml found (searched upward from {}).\n\
+             Fix: pass --config <path>, set FORGE_CONFIG, or run `forge-mcp init` to scaffold a corpus.",
+            cwd.display()
+        ),
+    };
 
     let cfg = Config::load(&config_path)
         .with_context(|| format!("failed to load config at {}", config_path.display()))?;

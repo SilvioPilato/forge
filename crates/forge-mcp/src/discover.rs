@@ -4,36 +4,32 @@ use std::path::{Path, PathBuf};
 /// 1. explicit (--config flag or positional arg)
 /// 2. env (FORGE_CONFIG)
 /// 3. walk up from cwd; a directory containing `.git` is the last one checked
+///
+/// Returns `None` when no forge.toml exists within the `.git` boundary —
+/// a valid state meaning "no corpus yet" (empty mode).
 pub fn resolve_config(
     explicit: Option<PathBuf>,
     env_value: Option<PathBuf>,
     cwd: &Path,
-) -> Result<PathBuf, String> {
+) -> Option<PathBuf> {
     if let Some(p) = explicit {
-        return Ok(p);
+        return Some(p);
     }
     if let Some(p) = env_value {
-        return Ok(p);
+        return Some(p);
     }
     let mut dir = Some(cwd);
     while let Some(d) = dir {
         let candidate = d.join("forge.toml");
         if candidate.is_file() {
-            return Ok(candidate);
+            return Some(candidate);
         }
-        // `.git` may be a directory or a file (worktrees); either marks the
-        // repo boundary. The boundary directory itself was just checked, so
-        // stop here rather than escape into unrelated parents.
         if d.join(".git").exists() {
             break;
         }
         dir = d.parent();
     }
-    Err(format!(
-        "No forge.toml found (searched upward from {}).\n\
-         Fix: pass --config <path>, set FORGE_CONFIG, or run `forge-mcp init` to scaffold a corpus.",
-        cwd.display()
-    ))
+    None
 }
 
 #[cfg(test)]
@@ -83,27 +79,20 @@ mod tests {
     }
 
     #[test]
+    fn miss_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        assert!(resolve_config(None, None, tmp.path()).is_none());
+    }
+
+    #[test]
     fn walk_stops_at_git_boundary() {
-        // forge.toml above the repo boundary must NOT be picked up.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("forge.toml"), "").unwrap();
         let repo = tmp.path().join("repo");
         let nested = repo.join("src");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let err = resolve_config(None, None, &nested).unwrap_err();
-        assert!(err.contains("No forge.toml found"), "got: {err}");
-    }
-
-    #[test]
-    fn miss_produces_actionable_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        // .git marker keeps the walk from escaping the temp dir on a
-        // developer machine that has a forge.toml somewhere above it.
-        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-        let err = resolve_config(None, None, tmp.path()).unwrap_err();
-        assert!(err.contains("forge-mcp init"), "got: {err}");
-        assert!(err.contains("--config"), "got: {err}");
-        assert!(err.contains("FORGE_CONFIG"), "got: {err}");
+        assert!(resolve_config(None, None, &nested).is_none());
     }
 }
