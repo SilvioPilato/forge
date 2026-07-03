@@ -140,6 +140,15 @@ struct SetStatusParams {
     status: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CreateForceParams {
+    title: String,
+    body: Option<String>,
+    tags: Option<Vec<String>>,
+    depends_on: Option<Vec<String>>,
+    force_new: Option<bool>,
+}
+
 #[tool_router]
 impl ForgeServer {
     #[tool(
@@ -397,6 +406,29 @@ impl ForgeServer {
             EngineState::Failed(err) => return Self::failed_response(&err.clone()),
         };
         match engine.set_status(&params.id, &params.status) {
+            Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
+            Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
+        }
+    }
+
+    #[tool(
+        description = "Record a standalone force (a constraint or pressure), independent of any decision, so it can be captured before a decision cites it. Call only after the user has assented in conversation. Optional depends_on lists existing force ids this force builds on; every id must already exist. A living near-duplicate at or above the reuse threshold is returned instead of writing a new file unless force_new is true. Writes the force file then rebuilds the index."
+    )]
+    async fn create_force(&self, Parameters(params): Parameters<CreateForceParams>) -> String {
+        let mut state = self.state.lock().await;
+        let engine = match &mut *state {
+            EngineState::Ready(e) => e,
+            EngineState::Empty => return Self::no_corpus_write_refused(),
+            EngineState::Loading => return Self::loading_response(),
+            EngineState::Failed(err) => return Self::failed_response(&err.clone()),
+        };
+        match engine.create_force(
+            params.title,
+            params.body.unwrap_or_default(),
+            params.tags.unwrap_or_default(),
+            params.depends_on.unwrap_or_default(),
+            params.force_new.unwrap_or(false),
+        ) {
             Ok(receipt) => serde_json::to_string_pretty(&receipt).unwrap(),
             Err(e) => serde_json::to_string(&serde_json::json!({"error": e})).unwrap(),
         }

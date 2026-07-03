@@ -43,11 +43,16 @@ fn near_matches_include_retired_forces() {
     let embedder = BucketEmbedder::default();
     let snap = Snapshot::build(&cfg, &embedder).unwrap();
 
+    // This asserts retired/superseded forces are *included* in near-matches with
+    // their status metadata. Since issue #8 embeds title + body, an exact-title
+    // query no longer scores 1.0 against the stored passage vector, so use a
+    // lower threshold here; the warn-cutoff itself is covered by
+    // near_matches_apply_warn_threshold.
     let results = forge_core::recall::near_matches(
         &snap,
         &embedder,
         "Storage must be a single flat directory",
-        0.75,
+        0.5,
     )
     .unwrap();
     let hit = results.iter().find(|h| h.id == "f-retired-old");
