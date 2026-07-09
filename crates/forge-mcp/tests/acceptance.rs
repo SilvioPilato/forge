@@ -423,6 +423,57 @@ fn acceptance_spec_13_reindex_picks_up_manual_edits() {
 }
 
 #[test]
+fn acceptance_spec_15_create_force_standalone() {
+    let corpus = temp_corpus_named("forge-mcp-create-force-test");
+    let config_path = corpus.join("forge.toml").to_string_lossy().to_string();
+    let mut client = MCPClient::new(&config_path);
+    client.initialize();
+    wait_ready(&mut client);
+
+    // create a standalone force that depends on an existing force
+    let resp = client.call_tool(
+        "create_force",
+        serde_json::json!({
+            "title": "Latency budget must stay under 50ms",
+            "body": "User-facing calls have a hard latency ceiling.",
+            "tags": ["performance"],
+            "depends_on": ["f-rust-stable"]
+        }),
+    );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let receipt: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(receipt["created"], true, "got: {receipt}");
+    let force_id = receipt["force_id"].as_str().unwrap().to_string();
+
+    // it is discoverable via get, with its dependency wired up
+    let get_resp = client.call_tool("get", serde_json::json!({ "id": force_id }));
+    let get_text = get_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let record: Value = serde_json::from_str(get_text).unwrap();
+    assert_eq!(record["type"], "force");
+    assert_eq!(record["current_status"], "holds");
+    assert!(
+        record["depends_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "f-rust-stable"),
+        "depends_on should include f-rust-stable: {record}"
+    );
+
+    // an unknown dependency is rejected as data, not a crash
+    let bad_resp = client.call_tool(
+        "create_force",
+        serde_json::json!({"title": "Bad dep force", "depends_on": ["f-nope"]}),
+    );
+    let bad_text = bad_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let bad: Value = serde_json::from_str(bad_text).unwrap();
+    assert!(
+        bad["error"].as_str().unwrap_or("").contains("f-nope"),
+        "expected unknown-dep error: {bad}"
+    );
+}
+
+#[test]
 fn acceptance_spec_14_handshake_completes_before_engine_ready() {
     let corpus = temp_corpus_named("forge-mcp-slow-load-test");
     let config_path = corpus.join("forge.toml").to_string_lossy().to_string();

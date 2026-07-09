@@ -55,12 +55,11 @@ impl Snapshot {
         let mut texts: Vec<String> = Vec::new();
         let mut text_ids: Vec<String> = Vec::new();
         for d in &linked.decisions {
-            let t = format!("{}\n\n{}", d.title, d.body);
-            texts.push(t);
+            texts.push(embed_text(&d.title, &d.body, &d.tags));
             text_ids.push(d.id.clone());
         }
         for f in &linked.forces {
-            texts.push(f.title.clone());
+            texts.push(embed_text(&f.title, &f.body, &f.tags));
             text_ids.push(f.id.clone());
         }
 
@@ -195,6 +194,18 @@ impl Snapshot {
     }
 }
 
+/// The text embedded for a record's similarity vector. Both decisions and
+/// forces embed `title + body` so short or generic titles stay searchable, and
+/// tags are appended so tag terms match a query too (issue #8).
+fn embed_text(title: &str, body: &str, tags: &[String]) -> String {
+    let mut text = format!("{}\n\n{}", title, body);
+    if !tags.is_empty() {
+        text.push_str("\n\nTags: ");
+        text.push_str(&tags.join(", "));
+    }
+    text
+}
+
 #[derive(Debug)]
 pub struct BuildError(pub String);
 
@@ -258,5 +269,53 @@ mod tests {
         assert!(snap.graph.get("d-embed-onnx").is_some());
         let decisions = snap.graph.decisions();
         assert_eq!(decisions.len(), 8);
+    }
+
+    // Issue #8: a force's body and tags must contribute to its search vector,
+    // not just its title. Two forces share a generic title; the distinctive
+    // terms live only in one's body and tags, so a query for those terms must
+    // surface that force ahead of the other.
+    #[test]
+    fn force_body_and_tags_are_searchable() {
+        use crate::embed::fake::BucketEmbedder;
+        use crate::recall::{search, Scope};
+
+        let dir = std::env::temp_dir().join("forge-snapshot-force-index-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let forces = dir.join("forces");
+        std::fs::create_dir_all(&forces).unwrap();
+        std::fs::write(
+            dir.join("forge.toml"),
+            "roots = [\"forces\"]\n[embedding]\nmodel = \"fake-bucket\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            forces.join("f-alpha.md"),
+            "---\nid: f-alpha\ntype: force\ntitle: Generic capability\nstatus_log:\n  - { status: holds, since: 2026-01-01 }\ntags: [distincttagword]\n---\nAlpha body mentions distinctbodyword prominently.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            forces.join("f-beta.md"),
+            "---\nid: f-beta\ntype: force\ntitle: Generic capability\nstatus_log:\n  - { status: holds, since: 2026-01-01 }\n---\nBeta body is entirely unrelated.\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load(&dir.join("forge.toml")).unwrap();
+        let embedder = BucketEmbedder::default();
+        let snap = Snapshot::build(&cfg, &embedder).unwrap();
+
+        let body_hits = search(&snap, &embedder, "distinctbodyword", Scope::Force, 5).unwrap();
+        assert_eq!(
+            body_hits.first().map(|h| h.id.as_str()),
+            Some("f-alpha"),
+            "body term should surface f-alpha: {body_hits:?}"
+        );
+
+        let tag_hits = search(&snap, &embedder, "distincttagword", Scope::Force, 5).unwrap();
+        assert_eq!(
+            tag_hits.first().map(|h| h.id.as_str()),
+            Some("f-alpha"),
+            "tag term should surface f-alpha: {tag_hits:?}"
+        );
     }
 }

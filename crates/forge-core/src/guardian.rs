@@ -289,6 +289,106 @@ impl Engine {
         })
     }
 
+    /// Record a Force on its own, ahead of any Decision that might cite it
+    /// (issue #7). Applies the same dedup policy `commit` uses for bundled
+    /// forces: a living near-duplicate at or above `dedup.reuse` is returned as
+    /// `reused` and no file is written unless `force_new` is set; matches in the
+    /// warn band are written but flagged. Every `depends_on` id must already
+    /// exist, otherwise nothing is written.
+    pub fn create_force(
+        &mut self,
+        title: String,
+        body: String,
+        tags: Vec<String>,
+        depends_on: Vec<String>,
+        force_new: bool,
+    ) -> Result<ForceReceipt, String> {
+        if title.trim().is_empty() {
+            return Err("force title must not be empty".to_string());
+        }
+        for dep in &depends_on {
+            if self.snapshot.graph.get(dep).is_none() {
+                return Err(format!("unknown force id: {}", dep));
+            }
+        }
+
+        let near = crate::recall::near_matches(
+            &self.snapshot,
+            self.embedder.as_ref(),
+            &title,
+            self.cfg.dedup.warn,
+        )
+        .map_err(|e| format!("near-match check failed: {}", e.0))?;
+
+        let living_matches: Vec<_> = near
+            .iter()
+            .filter(|h| h.status != "retired" && h.superseded_by.is_none())
+            .collect();
+
+        let mut warnings = Vec::new();
+        if let Some(best) = living_matches.first() {
+            if best.score >= self.cfg.dedup.reuse && !force_new {
+                return Ok(ForceReceipt {
+                    force_id: best.id.clone(),
+                    created: false,
+                    reused: Some(ReusedEntry {
+                        proposed_id: title.clone(),
+                        existing_id: best.id.clone(),
+                        score: best.score,
+                    }),
+                    warnings,
+                });
+            } else if best.score >= self.cfg.dedup.warn {
+                warnings.push(format!(
+                    "near-duplicate force '{}' (cosine {:.3} vs '{}')",
+                    title, best.score, best.id
+                ));
+            }
+        }
+        for h in &near {
+            if h.status == "retired" || h.superseded_by.is_some() {
+                warnings.push(format!(
+                    "near-match to retired/superseded force '{}' ({})",
+                    h.id, h.status
+                ));
+            }
+        }
+
+        let force_id = self.generate_id("f", &title);
+        let force = Force {
+            id: force_id.clone(),
+            title,
+            depends_on,
+            status_log: vec![StatusEntry {
+                status: ForceStatus::Holds,
+                since: today_iso(),
+            }],
+            superseded_by: None,
+            tags,
+            body,
+            path: std::path::PathBuf::new(),
+        };
+
+        let write_forces_dir = self.cfg.forces_write_dir.clone();
+        std::fs::create_dir_all(&write_forces_dir)
+            .map_err(|e| format!("create forces dir: {}", e))?;
+        let content = crate::record::serialize_force(&force);
+        let path = write_forces_dir.join(format!("{}.md", force_id));
+        std::fs::write(&path, &content).map_err(|e| format!("write force: {}", e))?;
+
+        self.rebuild()
+            .map_err(|e| format!("rebuild after create_force: {}", e))?;
+
+        info!(force_id = %force_id, "force created");
+
+        Ok(ForceReceipt {
+            force_id,
+            created: true,
+            reused: None,
+            warnings,
+        })
+    }
+
     pub fn generate_id(&self, prefix: &str, title: &str) -> String {
         let slug = title
             .to_lowercase()
@@ -469,6 +569,15 @@ pub struct StatusReceipt {
     pub id: String,
     pub new_status: String,
     pub newly_stale: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForceReceipt {
+    pub force_id: String,
+    /// False when an existing near-duplicate was reused instead of writing a file.
+    pub created: bool,
+    pub reused: Option<ReusedEntry>,
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -740,11 +849,18 @@ mod tests {
         let mut embedder = crate::embed::fake::PinnedEmbedder::new();
         let norm = (0.5_f32 * 0.5 + 0.5 * 0.5 + 0.5 * 0.5).sqrt();
         let v = vec![0.5 / norm, 0.5 / norm, 0.5 / norm];
-        embedder.pin("A test force", v.clone());
+        // The stored force embeds its passage text (title + body), while the
+        // near-dup check embeds the incoming title as a query — pin both forms.
+        embedder.pin("A test force\n\n...", v.clone());
         embedder.pin("A tast farce", vec![0.48 / norm, 0.52 / norm, 0.5 / norm]);
 
         let (_dir, config_path) = fixture_copy_to_temp();
-        let cfg = Config::load(&config_path).unwrap();
+        let mut cfg = Config::load(&config_path).unwrap();
+        // Isolate the vector cache: the shared default cache is keyed by content
+        // hash, so a bucket-fallback vector cached for this passage text under a
+        // different run would otherwise mask the pinned vector.
+        cfg.cache_dir = std::env::temp_dir().join("forge-dedup-high-band-cache");
+        let _ = std::fs::remove_dir_all(&cfg.cache_dir);
         let mut engine = Engine::new(cfg, Box::new(embedder)).unwrap();
 
         let p1 = engine
@@ -780,6 +896,106 @@ mod tests {
             .unwrap();
         let r2 = engine.commit(p2).unwrap();
         assert!(!r2.reused.is_empty());
+    }
+
+    #[test]
+    fn create_force_writes_and_is_discoverable() {
+        let (dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let mut engine = Engine::new(cfg, Box::new(BucketEmbedder::default())).unwrap();
+
+        let receipt = engine
+            .create_force(
+                "Networking must tolerate partitions".into(),
+                "Split-brain is unacceptable.".into(),
+                vec!["reliability".into()],
+                vec!["f-rust-stable".into()],
+                false,
+            )
+            .unwrap();
+
+        assert!(receipt.created);
+        assert!(receipt.reused.is_none());
+        let file = dir.join("forces").join(format!("{}.md", receipt.force_id));
+        assert!(file.exists(), "missing {}", file.display());
+
+        // rebuild ran, so the new force is in the live graph with its metadata
+        match engine.snapshot().graph.get(&receipt.force_id) {
+            Some(crate::graph::Record::Force(f)) => {
+                assert_eq!(f.depends_on, vec!["f-rust-stable".to_string()]);
+                assert_eq!(f.tags, vec!["reliability".to_string()]);
+            }
+            other => panic!("expected force, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn create_force_reuses_living_near_duplicate_without_writing() {
+        let (dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let mut engine = Engine::new(cfg, Box::new(BucketEmbedder::default())).unwrap();
+
+        // Empty body keeps the passage tokens identical to the title, so a second
+        // create with the same title scores 1.0 against the first — a clear reuse.
+        let first = engine
+            .create_force("A uniquely phrased reusable force".into(), "".into(), vec![], vec![], false)
+            .unwrap();
+        assert!(first.created);
+
+        let forces_before: usize =
+            std::fs::read_dir(dir.join("forces")).unwrap().count();
+
+        let second = engine
+            .create_force("A uniquely phrased reusable force".into(), "".into(), vec![], vec![], false)
+            .unwrap();
+        assert!(!second.created, "expected reuse, not a new force");
+        assert_eq!(second.force_id, first.force_id);
+        assert!(second.reused.is_some());
+
+        let forces_after: usize = std::fs::read_dir(dir.join("forces")).unwrap().count();
+        assert_eq!(forces_before, forces_after, "reuse must not write a file");
+    }
+
+    #[test]
+    fn create_force_with_force_new_bypasses_reuse() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let mut engine = Engine::new(cfg, Box::new(BucketEmbedder::default())).unwrap();
+
+        let first = engine
+            .create_force("Another distinctly worded force".into(), "".into(), vec![], vec![], false)
+            .unwrap();
+        let second = engine
+            .create_force("Another distinctly worded force".into(), "".into(), vec![], vec![], true)
+            .unwrap();
+
+        assert!(second.created);
+        assert_ne!(second.force_id, first.force_id);
+    }
+
+    #[test]
+    fn create_force_rejects_unknown_depends_on() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let mut engine = Engine::new(cfg, Box::new(BucketEmbedder::default())).unwrap();
+
+        let err = engine
+            .create_force("Force with a bad dep".into(), "body".into(), vec![], vec!["f-nope".into()], false)
+            .unwrap_err();
+        assert!(err.contains("unknown force id"), "got: {err}");
+        assert!(err.contains("f-nope"), "got: {err}");
+    }
+
+    #[test]
+    fn create_force_rejects_empty_title() {
+        let (_dir, config_path) = fixture_copy_to_temp();
+        let cfg = Config::load(&config_path).unwrap();
+        let mut engine = Engine::new(cfg, Box::new(BucketEmbedder::default())).unwrap();
+
+        let err = engine
+            .create_force("   ".into(), "body".into(), vec![], vec![], false)
+            .unwrap_err();
+        assert!(err.contains("title"), "got: {err}");
     }
 
     #[test]

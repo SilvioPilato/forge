@@ -30,10 +30,10 @@ model = "fake-bucket"              # "fake-bucket" for tests, or "intfloat/multi
 
 ## MCP Tools
 
-Nine tools exposed over stdio:
+Ten tools exposed over stdio:
 
 **Read tools** (always available):
-- `search` — Semantic search over frontier decisions and forces
+- `search` — Semantic search over frontier decisions and forces (indexes each record's title, body, and tags)
 - `get` — Get record by ID with neighborhood and verdict
 - `why` — Explain why a decision's premises are stale
 - `stale_report` — List all stale frontier decisions
@@ -41,6 +41,7 @@ Nine tools exposed over stdio:
 **Write tools** (require user assent):
 - `propose_decision` — Preview a new decision (pure, no writes)
 - `commit` — Write a proposed decision to disk with date frontmatter auto-populated (call only after user assent)
+- `create_force` — Record a standalone force independent of any decision, so it can be captured before a decision cites it; reuses a living near-duplicate unless `force_new` is set
 - `set_status` — Change force or decision status, returns propagation impact
 - `reindex` — Re-scan the corpus from disk and rebuild the index (use after manual file edits)
 
